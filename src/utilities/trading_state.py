@@ -1,8 +1,13 @@
-from typing import Dict, Any, List
+from __future__ import annotations
+from typing import Dict, Any, List, TYPE_CHECKING
 import asyncio
 from classes import Position, OrderRecord, MarketInfo, Snapshot
-from ..market_decisions.risk_manager import RiskManager
 import time
+
+if TYPE_CHECKING:
+    # only needed for type hints — avoids the runtime circular import with risk_manager.py
+    from ..market_decisions.risk_manager import RiskManager
+
 
 
 class TradingState:
