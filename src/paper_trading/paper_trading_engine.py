@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from ..utilities.trading_state import TradingState
-from ..utilities.classes import OrderIntent, MarketInfo, Position
+from ..utilities.classes import OrderIntent, MarketInfo, OrderRecord
 
 class PaperTradingEngine:
     """Simulates fills, P&L, and positions for testing without live trading."""
