@@ -1,0 +1,1 @@
+"""Minimal Polymarket bot scaffold."""
