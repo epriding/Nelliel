@@ -1,17 +1,18 @@
-from polymarket_us import PolymarketUS
+from polymarket_us import AsyncPolymarketUS
 from typing import Dict
 import dotenv
 import os
+import asyncio
 
 
 dotenv.load_dotenv()
 
 class PolymarketClient():
     def __init__(self, key_id: str, secret_key: str, paper_trading: bool = True):
-        self.client = PolymarketUS(key_id=key_id, secret_key=secret_key)
+        self.client = AsyncPolymarketUS(key_id=key_id, secret_key=secret_key)
 
 
-    def get_markets(self, active: bool = True, limit: int = 100, offset: int = 0) -> Dict:
+    async def get_markets(self, active: bool = True, limit: int = 100, offset: int = 0) -> Dict:
         params = {
             'limit': limit,
             'active': active,
@@ -29,11 +30,11 @@ class PolymarketClient():
 
         return values
 
-    def get_market(self, market_id: str) -> Dict:
+    async def get_market(self, market_id: str) -> Dict:
         response = self.client.markets.retrieve(market_id)
         return response
 
-    def get_all_markets(self, limit: int = None, active: bool = True) -> Dict:
+    async def get_all_markets(self, limit: int = None, active: bool = True) -> Dict:
         offset = 0
         all_markets = []
 
@@ -48,15 +49,15 @@ class PolymarketClient():
 
         return {'markets': all_markets}
 
-    def get_orderbook(self, slug: str) -> Dict:
+    async def get_orderbook(self, slug: str) -> Dict:
         response = self.client.markets.book(slug)
         return response
 
-    def get_bbo(self, slug: str) -> Dict:
+    async def get_bbo(self, slug: str) -> Dict:
         response = self.client.markets.bbo(slug)
         return response
    
-    def create_order(self, slug: str, intent: str, order_type: str, price: str, quantity: int, tif: str, slippage: float = None, currency: str = "USD") -> Dict:
+    async def create_order(self, slug: str, intent: str, order_type: str, price: str, quantity: int, tif: str, slippage: float = None, currency: str = "USD") -> Dict:
         """This Creates an order, can be buy, sell, or limits, etc. changed through the intent"""
 
         if order_type == "ORDER_TYPE_LIMIT":
@@ -90,11 +91,11 @@ class PolymarketClient():
             logger.warning("No slippage tolerance specified for order creation.")
             return {'error': 'No slippage tolerance specified for order creation.'}
 
-    def cancel_order(self, order_id: str, slug: str) -> Dict:
+    async def cancel_order(self, order_id: str, slug: str) -> Dict:
         response = self.client.orders.cancel(order_id, {"marketSlug": slug})
         return response
 
-    def cancel_all_orders(self, slug: str = None) -> Dict:
+    async def cancel_all_orders(self, slug: str = None) -> Dict:
             if slug is None:
                 #cancels all orders
                 response = self.client.orders.cancel_all()
@@ -104,7 +105,7 @@ class PolymarketClient():
             response = self.client.orders.cancel_all({"marketSlug": slug})
             return response
 
-    def get_preview(self, slug: str, intent: str, order_type: str, price: str, quantity: int, currency: str) -> Dict:
+    async def get_preview(self, slug: str, intent: str, order_type: str, price: str, quantity: int, currency: str) -> Dict:
         """Primarily going to be used for paper trading"""
         params = {
                 'slug': slug,
@@ -116,7 +117,7 @@ class PolymarketClient():
         response = self.client.orders.preview(params)
         return response
 
-    def close_position(self, slug: str, price: str = None, currency: str = "USD", slippage: float = None) -> Dict:
+    async def close_position(self, slug: str, price: str = None, currency: str = "USD", slippage: float = None) -> Dict:
         """Closes all positions for a given market, at a given price if stated"""
         if price is not None and slippage is not None:
             params = {
@@ -136,12 +137,12 @@ class PolymarketClient():
             response = self.client.orders.close_position(params)
             return response
 
-    def get_orders(self):
+    async def get_orders(self):
         """Gets all open orders"""
         response = self.client.orders.list()
         return response
 
-    def get_positions(self, limit: int = None, cursor: str = None):
+    async def get_positions(self, limit: int = None, cursor: str = None):
         if limit is not None and cursor is not None:
             positions = self.client.portfolio.positions(limit=limit, cursor=cursor)
             return positions
@@ -158,7 +159,7 @@ class PolymarketClient():
             positions = self.client.portfolio.positions()
             return positions
 
-    def get_activities(self, limit: int = None, cursor: str = None, types: list[str] = None, marketslug: str = None, sortorder: str = 'SORT_ORDER_DESCENDING'):
+    async def get_activities(self, limit: int = None, cursor: str = None, types: list[str] = None, marketslug: str = None, sortorder: str = 'SORT_ORDER_DESCENDING'):
         raw_params = {
             'limit': limit,
             'cursor': cursor,
@@ -172,7 +173,7 @@ class PolymarketClient():
         activities = self.client.portfolio.activities(params)
         return activities
 
-    def get_balance(self):
+    async def get_balance(self):
         balances = self.client.account.balances()
         return balances
 

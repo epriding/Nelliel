@@ -20,6 +20,7 @@ class TradingState:
         self.open_orders: Dict[str, OrderRecord] = {}
         self.balance: Dict[str, float] = {"USDC": 0.0}
         self.risk_manager: RiskManager = risk_manager
+        self.paper_trading: Dict[str: bool] = {}
         self.lock = asyncio.Lock()
 
     async def update_trading_state(self, market: MarketInfo) -> None:

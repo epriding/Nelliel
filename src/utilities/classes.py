@@ -28,6 +28,7 @@ class OrderIntent:
     price: float
     strategy: str
     reason: str = ""
+    paper_trading: bool = True
 
 
 @dataclass
@@ -41,7 +42,7 @@ class OrderRecord:
     status: str = "PENDING"
     strategy: str = ""
 
-
+#might need to turn this to regular class so it can update its price automatically
 @dataclass
 class Position:
     market_id: str
