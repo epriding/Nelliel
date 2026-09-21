@@ -3,14 +3,21 @@ from typing import Dict
 import dotenv
 import os
 import asyncio
+from ...utilities.trading_state import TradingState
 
 
 dotenv.load_dotenv()
 
-class PolymarketClient():
-    def __init__(self, key_id: str, secret_key: str, paper_trading: bool = True):
+class PolymarketAPI():
+    def __init__(self, key_id: str, secret_key: str, state: TradingState):
         self.client = AsyncPolymarketUS(key_id=key_id, secret_key=secret_key)
+        self.state = state
 
+    def _get_slug(self, market_id: str) -> str:
+        market = self.state.markets.get(market_id)
+        if market is None:
+            raise ValueError(f"Unknown market_id: {market_id}")
+        return market.slug
 
     async def get_markets(self, active: bool = True, limit: int = 100, offset: int = 0) -> Dict:
         params = {
@@ -20,7 +27,7 @@ class PolymarketClient():
             'offset': offset
         }
 
-        response = self.client.markets.list(params)
+        response =  await self.client.markets.list(params)
 
 
         values = {
@@ -49,9 +56,31 @@ class PolymarketClient():
 
         return {'markets': all_markets}
 
-    async def get_orderbook(self, slug: str) -> Dict:
+    def _invert_book(self, yes_book: Dict) -> Dict:
+        """Derive the NO-side book from a YES-denominated book."""
+        return {
+            **yes_book,
+            "bids": [
+                {"px": {"value": 1.0 - ask["px"]["value"], "currency": ask["px"]["currency"]}, "qty": ask["qty"]}
+                for ask in yes_book.get("offers", [])
+            ],
+            "offers": [
+                {"px": {"value": 1.0 - bid["px"]["value"], "currency": bid["px"]["currency"]}, "qty": bid["qty"]}
+                for bid in yes_book.get("bids", [])
+            ],
+        }
+
+    async def get_orderbook(self, market_id: str, outcome: str = None) -> Dict:
+        slug = self._get_slug(market_id)
         response = self.client.markets.book(slug)
-        return response
+        yes_book = response["marketData"]
+
+        if outcome == "YES":
+            return yes_book
+        elif outcome == "NO":
+            return self._invert_book(yes_book)
+        else:
+            return {"YES": yes_book, "NO": self._invert_book(yes_book)}
 
     async def get_bbo(self, slug: str) -> Dict:
         response = self.client.markets.bbo(slug)
@@ -178,9 +207,10 @@ class PolymarketClient():
         return balances
 
 if __name__ == "__main__":
-    client = PolymarketClient(key_id=os.getenv("KEY_ID"), secret_key=os.getenv("SECRET_KEY"))
-    markets = client.get_markets(active=True, limit=1)
-    orderbook = client.get_orderbook(slug=markets['markets'][0]['slug'])
-    activities = client.list_activities()
+    async def main():
+        client = PolymarketAPI(key_id=os.getenv("KEY_ID"), secret_key=os.getenv("SECRET_KEY"))
+        response = await client.get_markets(active=True, limit=1)
 
-    print(activities)
+        print(response)
+
+    asyncio.run(main())

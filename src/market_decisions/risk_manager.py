@@ -8,7 +8,7 @@ class RiskManager:
     def __init__(self, config: TradingConfig):
         self.config = config
 
-    def check_trade_allowed(self, position: Position, order: OrderIntent) -> bool:
+    def check_trade_allowed(self, order: OrderIntent) -> bool:
         raise NotImplementedError
 
     def get_exposure(self, state: TradingState) -> float:

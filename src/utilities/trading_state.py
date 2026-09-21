@@ -58,6 +58,19 @@ class TradingState:
             self.positions = {f"{p.market_id}:{p.outcome}": p for p in positions}
             self.open_orders = {o.order_id: o for o in orders}
 
+    async def get_current_price(self, position: Position) -> Dict[str, float]:
+        return self.orderbooks[f'{position.market_id}:{position.outcome}']['pricing']
+
+    async def get_cached_orderbook(self, market_id: str, outcome: str) -> Dict[str, Any]:
+        async with self.lock:
+            key = f"{market_id}:{outcome}"
+            orderbook = self.orderbooks.get(key)
+
+            if orderbook is None:
+                raise KeyError(f"No orderbook cached for {key}")
+
+            return orderbook
+
     async def snapshot(self) -> Snapshot:
         current_snapshot = Snapshot(
             time=time.time(),

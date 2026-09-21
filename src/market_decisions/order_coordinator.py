@@ -1,4 +1,4 @@
-from ..api.polymarket.polyUS_client import PolymarketClient
+from ..api.polymarket.polyUS_api import PolymarketClient
 from ..market_decisions.risk_manager import RiskManager
 from ..utilities.trading_state import TradingState
 from ..utilities.classes import OrderIntent, OrderRecord, Position

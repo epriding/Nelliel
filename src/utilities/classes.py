@@ -2,21 +2,42 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from enum import Enum
 
+@dataclass(frozen=True)
+class MarketDataEvent:
+    """Common fields every event carries."""
+    market_id: str
+    outcome: str
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class BookSnapshotEvent(MarketDataEvent):
+    """Full orderbook replace."""
+    bids: Dict[float, float]   # price -> size
+    asks: Dict[float, float]
+
+
+@dataclass(frozen=True)
+class PriceChangeEvent(MarketDataEvent):
+    """Incremental update — merge into existing book, don't replace."""
+    price: float
+    size: float
+    side: str  # "BID" or "ASK"
+
 class Side(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
 
-
+#consider making this more descriptive by adding more values example: subject, volume24hr, volume1hr, etc.
 @dataclass
 class MarketInfo:
     market_id: str
     slug: str
     token_ids: Dict[str, str]
     active: bool
-    tradable: bool
+    tradable: Dict[str, bool]
     volume: float = 0.0
-    price_yes: Optional[float] = None
-    price_no: Optional[float] = None
+    prices: Dict[str, float]
 
 
 @dataclass
@@ -28,7 +49,6 @@ class OrderIntent:
     price: float
     strategy: str
     reason: str = ""
-    paper_trading: bool = True
 
 
 @dataclass
@@ -42,7 +62,7 @@ class OrderRecord:
     status: str = "PENDING"
     strategy: str = ""
 
-#might need to turn this to regular class so it can update its price automatically
+
 @dataclass
 class Position:
     market_id: str
@@ -51,11 +71,11 @@ class Position:
     entry_price: float
     side: Side
     strategy: str
-    #consider adding a current price to the dataclass, would need to somehow update price real time
 
 class TradingConfig:
     def __init__(self):
-        self.paper_trading: bool = True
+        #consider adding a strategies dict where we list the strateigies we want and specific details about them
+        self.paper_trading: Dict[str: bool] = {}
         self.poll_interval_seconds: float = 1.0
         self.max_markets_per_subscription: int = 200
         self.max_open_positions: int = 25
