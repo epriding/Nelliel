@@ -38,7 +38,7 @@ class PolymarketAPI():
         all_markets = []
 
         while True:
-            response = self.get_markets(active=active, limit=1000, offset=offset)
+            response = await self.get_markets(active=active, limit=1000, offset=offset)
             all_markets.extend(response['markets'])
 
             if limit and len(all_markets) >= limit:

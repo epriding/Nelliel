@@ -23,17 +23,17 @@ class PolyUsClient(RestClient):
                 slug=market['slug'],
                 token_ids={
                     market['marketSides'][0]['description'].upper(): market['marketSides'][0]['id'],
-                    market['marketSides'][1]['descrption'].upper(): market['marketSides'][1]['id']
+                    market['marketSides'][1]['description'].upper(): market['marketSides'][1]['id']
                 },
                 active=market['active'],
                 tradable={
                     market['marketSides'][0]['description'].upper(): market['marketSides'][0]['tradable'],
-                    market['marketSides'][1]['descrption'].upper(): market['marketSides'][1]['tradable']
+                    market['marketSides'][1]['description'].upper(): market['marketSides'][1]['tradable']
                 },
                 volume=market['volume'],
                 prices={
                     market['marketSides'][0]['description'].upper(): market['marketSides'][0]['price'],
-                    market['marketSides'][1]['descrption'].upper(): market['marketSides'][1]['price']
+                    market['marketSides'][1]['description'].upper(): market['marketSides'][1]['price']
                 },
             )
             markets.append(market_info)

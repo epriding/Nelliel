@@ -1,4 +1,4 @@
-from ..api.polymarket.polyUS_api import PolymarketClient
+from ..api.interfaces.polymarket_US import PolyUsClient
 from ..market_decisions.risk_manager import RiskManager
 from ..utilities.trading_state import TradingState
 from ..utilities.classes import OrderIntent, OrderRecord, Position
@@ -12,7 +12,7 @@ logger = setup_logger(__name__)
 class OrderCoordinator:
     """Serializes all order actions and maintains local correctness."""
 
-    def __init__(self, client: PolymarketClient, risk: RiskManager, state: TradingState, paper_engine: PaperTradingEngine):
+    def __init__(self, client: PolyUsClient, risk: RiskManager, state: TradingState, paper_engine: PaperTradingEngine):
         self.client = client
         self.risk = risk
         self.state = state

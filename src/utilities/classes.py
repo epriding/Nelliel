@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 from enum import Enum
 
@@ -37,7 +37,7 @@ class MarketInfo:
     active: bool
     tradable: Dict[str, bool]
     volume: float = 0.0
-    prices: Dict[str, float]
+    prices: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -75,7 +75,7 @@ class Position:
 class TradingConfig:
     def __init__(self):
         #consider adding a strategies dict where we list the strateigies we want and specific details about them
-        self.paper_trading: Dict[str: bool] = {}
+        self.paper_trading: Dict[str, bool] = {}
         self.poll_interval_seconds: float = 1.0
         self.max_markets_per_subscription: int = 200
         self.max_open_positions: int = 25

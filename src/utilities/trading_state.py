@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any, List, TYPE_CHECKING
 import asyncio
-from classes import Position, OrderRecord, MarketInfo, Snapshot
+from .classes import Position, OrderRecord, MarketInfo, Snapshot
 import time
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ class TradingState:
         self.open_orders: Dict[str, OrderRecord] = {}
         self.balance: Dict[str, float] = {"USDC": 0.0}
         self.risk_manager: RiskManager = risk_manager
-        self.paper_trading: Dict[str: bool] = {}
+        self.paper_trading: Dict[str, bool] = {}
         self.lock = asyncio.Lock()
 
     async def update_trading_state(self, market: MarketInfo) -> None:
