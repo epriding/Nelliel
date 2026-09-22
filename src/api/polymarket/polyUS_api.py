@@ -3,21 +3,13 @@ from typing import Dict
 import dotenv
 import os
 import asyncio
-from ...utilities.trading_state import TradingState
 
 
 dotenv.load_dotenv()
 
 class PolymarketAPI():
-    def __init__(self, key_id: str, secret_key: str, state: TradingState):
+    def __init__(self, key_id: str, secret_key: str):
         self.client = AsyncPolymarketUS(key_id=key_id, secret_key=secret_key)
-        self.state = state
-
-    def _get_slug(self, market_id: str) -> str:
-        market = self.state.markets.get(market_id)
-        if market is None:
-            raise ValueError(f"Unknown market_id: {market_id}")
-        return market.slug
 
     async def get_markets(self, active: bool = True, limit: int = 100, offset: int = 0) -> Dict:
         params = {
@@ -38,7 +30,7 @@ class PolymarketAPI():
         return values
 
     async def get_market(self, market_id: str) -> Dict:
-        response = self.client.markets.retrieve(market_id)
+        response = await self.client.markets.retrieve(market_id)
         return response
 
     async def get_all_markets(self, limit: int = None, active: bool = True) -> Dict:
@@ -70,9 +62,8 @@ class PolymarketAPI():
             ],
         }
 
-    async def get_orderbook(self, market_id: str, outcome: str = None) -> Dict:
-        slug = self._get_slug(market_id)
-        response = self.client.markets.book(slug)
+    async def get_orderbook(self, slug: str, outcome: str = None) -> Dict:
+        response = await self.client.markets.book(slug)
         yes_book = response["marketData"]
 
         if outcome == "YES":
@@ -83,7 +74,7 @@ class PolymarketAPI():
             return {"YES": yes_book, "NO": self._invert_book(yes_book)}
 
     async def get_bbo(self, slug: str) -> Dict:
-        response = self.client.markets.bbo(slug)
+        response = await self.client.markets.bbo(slug)
         return response
    
     async def create_order(self, slug: str, intent: str, order_type: str, price: str, quantity: int, tif: str, slippage: float = None, currency: str = "USD") -> Dict:
@@ -98,7 +89,7 @@ class PolymarketAPI():
                 'quantity': quantity,
                 'tif': tif
             }
-            response = self.client.orders.create(params)
+            response = await self.client.orders.create(params)
             return response 
 
         elif slippage is not None:
@@ -114,24 +105,24 @@ class PolymarketAPI():
                 }
             }
 
-            response = self.client.orders.create(params)
+            response = await self.client.orders.create(params)
             return response
         else:
             logger.warning("No slippage tolerance specified for order creation.")
             return {'error': 'No slippage tolerance specified for order creation.'}
 
     async def cancel_order(self, order_id: str, slug: str) -> Dict:
-        response = self.client.orders.cancel(order_id, {"marketSlug": slug})
+        response = await self.client.orders.cancel(order_id, {"marketSlug": slug})
         return response
 
     async def cancel_all_orders(self, slug: str = None) -> Dict:
             if slug is None:
                 #cancels all orders
-                response = self.client.orders.cancel_all()
+                response = await self.client.orders.cancel_all()
                 return response
 
             #cancel all order for a specific market
-            response = self.client.orders.cancel_all({"marketSlug": slug})
+            response = await self.client.orders.cancel_all({"marketSlug": slug})
             return response
 
     async def get_preview(self, slug: str, intent: str, order_type: str, price: str, quantity: int, currency: str) -> Dict:
@@ -143,7 +134,7 @@ class PolymarketAPI():
                 'price': {'value': price, 'currency': currency},
                 'quantity': quantity,
             }
-        response = self.client.orders.preview(params)
+        response = await self.client.orders.preview(params)
         return response
 
     async def close_position(self, slug: str, price: str = None, currency: str = "USD", slippage: float = None) -> Dict:
@@ -156,36 +147,36 @@ class PolymarketAPI():
                     'ticks': slippage
                 }
             }
-            response = self.client.orders.close_position(params)
+            response = await self.client.orders.close_position(params)
             return response
 
         else:
             params = {
                 'marketSlug': slug
             }
-            response = self.client.orders.close_position(params)
+            response = await self.client.orders.close_position(params)
             return response
 
     async def get_orders(self):
         """Gets all open orders"""
-        response = self.client.orders.list()
+        response = await self.client.orders.list()
         return response
 
     async def get_positions(self, limit: int = None, cursor: str = None):
         if limit is not None and cursor is not None:
-            positions = self.client.portfolio.positions(limit=limit, cursor=cursor)
+            positions = await self.client.portfolio.positions(limit=limit, cursor=cursor)
             return positions
 
         elif cursor is not None:
-            positions = self.client.portfolio.positions(cursor=cursor)
+            positions = await self.client.portfolio.positions(cursor=cursor)
             return positions
 
         elif limit is not None:
-            positions = self.client.portfolio.positions(limit=limit)
+            positions = await self.client.portfolio.positions(limit=limit)
             return positions
 
         else:
-            positions = self.client.portfolio.positions()
+            positions = await self.client.portfolio.positions()
             return positions
 
     async def get_activities(self, limit: int = None, cursor: str = None, types: list[str] = None, marketslug: str = None, sortorder: str = 'SORT_ORDER_DESCENDING'):
@@ -199,11 +190,11 @@ class PolymarketAPI():
 
         params = {k: v for k, v in raw_params.items()}
 
-        activities = self.client.portfolio.activities(params)
+        activities = await self.client.portfolio.activities(params)
         return activities
 
     async def get_balance(self):
-        balances = self.client.account.balances()
+        balances = await self.client.account.balances()
         return balances
 
 if __name__ == "__main__":
