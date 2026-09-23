@@ -27,9 +27,9 @@ class TradingState:
         async with self.lock:
            self.markets[f'{market.exchange}:{market.market_id}'] = market
 
-    async def update_orderbook(self, market_id: str, outcome: str, orderbook: OrderBook) -> None:
+    async def update_orderbook(self, orderbook: OrderBook) -> None:
         async with self.lock:
-            self.orderbooks[f"{orderbook.exchange}:{market_id}:{outcome}"] = orderbook
+            self.orderbooks[f"{orderbook.exchange}:{orderbook.market_id}:{orderbook.outcome}"] = orderbook
 
     async def update_position(self, position: Position) -> None:
         """Adds or overwrites a single position."""
@@ -59,7 +59,7 @@ class TradingState:
             self.positions = {f"{p.exchange}:{p.market_id}:{p.outcome}": p for p in positions}
             self.open_orders = {f"{o.exchange}:{o.order_id}": o for o in orders}
 
-    async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> Dict[str, Any]:
+    async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> OrderBook:
         async with self.lock:
             key = f"{exchange}:{market_id}:{outcome}"
             orderbook = self.orderbooks.get(key)
@@ -71,7 +71,7 @@ class TradingState:
 
     async def snapshot(self) -> Snapshot:
         current_snapshot = Snapshot(
-            time=time.time(),
+            timestamp=time.time(),
             markets=self.markets,
             orderbooks=self.orderbooks,
             positions=self.positions,

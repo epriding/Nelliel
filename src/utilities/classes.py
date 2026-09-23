@@ -118,7 +118,7 @@ class TradingConfig:
 class Snapshot:
     timestamp: float
     markets: Dict[str, MarketInfo]              # from state.markets
-    orderbooks: Dict[str, Dict[str, Any]]        # from state.orderbooks, keyed by market_id/outcome
+    orderbooks: Dict[str, OrderBook]        # from state.orderbooks, keyed by market_id/outcome
     positions: Dict[str, Position]               # from state.positions
     open_orders: Dict[str, OrderRecord]          # from state.open_orders
     balance: Dict[str, float]                    # from state.balance
