@@ -40,7 +40,7 @@ class TradingState:
     async def remove_position(self, market_id: str, outcome: str, exchange: str) -> None:
         """Removes a position, e.g. when fully closed."""
         async with self.lock:
-            key = f"{exchange}{market_id}:{outcome}"
+            key = f"{exchange}:{market_id}:{outcome}"
             self.positions.pop(key, None)
 
     async def update_open_order(self, order: OrderRecord) -> None:
@@ -57,7 +57,7 @@ class TradingState:
     async def reconcile(self, positions: List[Position], orders: List[OrderRecord]) -> None:
         async with self.lock:
             self.positions = {f"{p.exchange}:{p.market_id}:{p.outcome}": p for p in positions}
-            self.open_orders = {o.order_id: o for o in orders}
+            self.open_orders = {f"{o.exchange}:{o.order_id}": o for o in orders}
 
     async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> Dict[str, Any]:
         async with self.lock:

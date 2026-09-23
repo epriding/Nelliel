@@ -18,6 +18,7 @@ class PaperTradingEngine:
         return OrderRecord(
             order_id=str(uuid.uuid4()),
             market_id=order.market_id,
+            exchange=order.exchange,
             outcome=order.outcome,
             side=order.side,
             size=order.size,

@@ -44,6 +44,7 @@ class OrderCoordinator:
         if existing is None:
             new_position = Position(
                 market_id=order.market_id,
+                exchange=order.exchange,
                 outcome=order.outcome,
                 size=order.size,
                 entry_price=order.price,
@@ -66,7 +67,7 @@ class OrderCoordinator:
                 existing.size -= order.size
                 await self.state.update_position(existing)
             elif order.size == existing.size:
-                await self.state.remove_position(order.market_id, order.outcome)
+                await self.state.remove_position(order.market_id, order.outcome, order.exchange)
             else:
                 # order.size > existing.size — flips direction, unresolved, see note below
                 raise NotImplementedError("Position flip not handled yet")
