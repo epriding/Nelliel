@@ -8,6 +8,7 @@ class MarketDataEvent:
     market_id: str
     outcome: str
     timestamp: float
+    exchange: str
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,29 @@ class PriceChangeEvent(MarketDataEvent):
     size: float
     side: str  # "BID" or "ASK"
 
+@dataclass
+class OrderBook:
+    market_id: str
+    exchange: str
+    outcome: str
+    bids: Dict[float, float]   # price -> size
+    asks: Dict[float, float]
+    timestamp: float
+
+    def apply_snapshot(self, event: BookSnapshotEvent) -> None:
+        # full replace — snapshot is authoritative
+        self.bids = dict(event.bids)
+        self.asks = dict(event.asks)
+        self.timestamp = event.timestamp
+
+    def apply_price_change(self, event: PriceChangeEvent) -> None:
+        book_side = self.bids if event.side == "BID" else self.asks
+        if event.size == 0:
+            book_side.pop(event.price, None)   # size 0 = level removed
+        else:
+            book_side[event.price] = event.size
+        self.timestamp = event.timestamp
+
 class Side(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
@@ -32,6 +56,7 @@ class Side(str, Enum):
 @dataclass
 class MarketInfo:
     market_id: str
+    exchange: str
     slug: str
     token_ids: Dict[str, str]
     active: bool
@@ -43,6 +68,7 @@ class MarketInfo:
 @dataclass
 class OrderIntent:
     market_id: str
+    exchange: str
     side: Side
     outcome: str
     size: float
@@ -55,6 +81,7 @@ class OrderIntent:
 class OrderRecord:
     order_id: str
     market_id: str
+    exchange: str
     outcome: str
     side: Side
     size: float
@@ -66,6 +93,7 @@ class OrderRecord:
 @dataclass
 class Position:
     market_id: str
+    exchange: str
     outcome: str
     size: float
     entry_price: float

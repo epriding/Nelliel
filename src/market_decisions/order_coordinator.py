@@ -25,7 +25,7 @@ class OrderCoordinator:
             if not self.risk.check_trade_allowed(order=order):
 
                 if self.state.paper_trading[order.strategy]:
-                    market = self.state.markets[order.market_id]
+                    market = self.state.markets[f"{order.exchange}:{order.market_id}"]
                     record = await self.paper_engine.simulate_fill(order, market)
                 else:
                     #need the polymarket us adapter for the api
@@ -38,7 +38,7 @@ class OrderCoordinator:
                 return record
 
     async def _apply_fill(self, order: OrderRecord) -> None:
-        key = f"{order.market_id}:{order.outcome}"
+        key = f"{order.exchange}:{order.market_id}:{order.outcome}"
         existing = self.state.positions.get(key)
 
         if existing is None:

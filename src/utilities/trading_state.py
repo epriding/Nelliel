@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any, List, TYPE_CHECKING
 import asyncio
-from .classes import Position, OrderRecord, MarketInfo, Snapshot
+from .classes import Position, OrderRecord, MarketInfo, Snapshot, OrderBook
 import time
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ class TradingState:
 
     def __init__(self, risk_manager: RiskManager):
         self.markets: Dict[str, MarketInfo] = {}
-        self.orderbooks: Dict[str, Dict[str, Any]] = {}
+        self.orderbooks: Dict[str, OrderBook] = {}
         self.positions: Dict[str, Position] = {}
         self.open_orders: Dict[str, OrderRecord] = {}
         self.balance: Dict[str, float] = {"USDC": 0.0}
@@ -25,45 +25,43 @@ class TradingState:
 
     async def update_trading_state(self, market: MarketInfo) -> None:
         async with self.lock:
-           self.markets[market.market_id] = market
+           self.markets[f'{market.exchange}:{market.market_id}'] = market
 
-    async def update_orderbook(self, market_id: str, outcome: str, orderbook: Dict[str, Any]) -> None:
+    async def update_orderbook(self, market_id: str, outcome: str, orderbook: OrderBook) -> None:
         async with self.lock:
-            self.orderbooks[f"{market_id}:{outcome}"] = orderbook
+            self.orderbooks[f"{orderbook.exchange}:{market_id}:{outcome}"] = orderbook
 
     async def update_position(self, position: Position) -> None:
         """Adds or overwrites a single position."""
         async with self.lock:
-            key = f"{position.market_id}:{position.outcome}"
+            key = f"{position.exchange}:{position.market_id}:{position.outcome}"
             self.positions[key] = position
 
-    async def remove_position(self, market_id: str, outcome: str) -> None:
+    async def remove_position(self, market_id: str, outcome: str, exchange: str) -> None:
         """Removes a position, e.g. when fully closed."""
         async with self.lock:
-            key = f"{market_id}:{outcome}"
+            key = f"{exchange}{market_id}:{outcome}"
             self.positions.pop(key, None)
 
     async def update_open_order(self, order: OrderRecord) -> None:
         """Adds or overwrites a single open order."""
         async with self.lock:
-            self.open_orders[order.order_id] = order
+            self.open_orders[f"{order.exchange}:{order.order_id}"] = order
 
-    async def remove_open_order(self, order_id: str) -> None:
+    async def remove_open_order(self, order_id: str, exchange: str) -> None:
         """Removes an order, e.g. once filled or cancelled."""
         async with self.lock:
-            self.open_orders.pop(order_id, None)
+            key = f"{exchange}:{order_id}"
+            self.open_orders.pop(key, None)
 
     async def reconcile(self, positions: List[Position], orders: List[OrderRecord]) -> None:
         async with self.lock:
-            self.positions = {f"{p.market_id}:{p.outcome}": p for p in positions}
+            self.positions = {f"{p.exchange}:{p.market_id}:{p.outcome}": p for p in positions}
             self.open_orders = {o.order_id: o for o in orders}
 
-    async def get_current_price(self, position: Position) -> Dict[str, float]:
-        return self.orderbooks[f'{position.market_id}:{position.outcome}']['pricing']
-
-    async def get_cached_orderbook(self, market_id: str, outcome: str) -> Dict[str, Any]:
+    async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> Dict[str, Any]:
         async with self.lock:
-            key = f"{market_id}:{outcome}"
+            key = f"{exchange}:{market_id}:{outcome}"
             orderbook = self.orderbooks.get(key)
 
             if orderbook is None:
