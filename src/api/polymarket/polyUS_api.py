@@ -197,6 +197,10 @@ class PolymarketAPI():
         balances = await self.client.account.balances()
         return balances
 
+    async def get_market_by_slug(self, slug: str) -> Dict:
+        response = await self.client.markets.retrieve_by_slug(slug)
+        return response
+
 if __name__ == "__main__":
     async def main():
         client = PolymarketAPI(key_id=os.getenv("KEY_ID"), secret_key=os.getenv("SECRET_KEY"))

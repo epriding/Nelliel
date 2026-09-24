@@ -20,7 +20,7 @@ class TradingState:
         self.open_orders: Dict[str, OrderRecord] = {}
         self.balance: Dict[str, float] = {"USDC": 0.0}
         self.risk_manager: RiskManager = risk_manager
-        self.paper_trading: Dict[str, bool] = {}
+        self.paper_trading: Dict[str, bool] = risk_manager.config.paper_trading
         self.lock = asyncio.Lock()
 
     async def update_trading_state(self, market: MarketInfo) -> None:
@@ -56,8 +56,25 @@ class TradingState:
 
     async def reconcile(self, positions: List[Position], orders: List[OrderRecord]) -> None:
         async with self.lock:
-            self.positions = {f"{p.exchange}:{p.market_id}:{p.outcome}": p for p in positions}
-            self.open_orders = {f"{o.exchange}:{o.order_id}": o for o in orders}
+            preserved_paper = {
+            k: v for k, v in self.positions.items()
+            if self.paper_trading.get(v.strategy, False)
+        }
+
+            live_positions = {}
+            for p in positions:
+                key = f"{p.exchange}:{p.market_id}:{p.outcome}"
+                existing = self.positions.get(key)
+
+                if existing is not None:
+                    p.strategy = existing.strategy  # carry over known attribution
+                else:
+                    pass
+                    #add logging critical warning here oprhan position found
+                    #then sell off postion to cut losses
+                live_positions[key] = p
+
+        self.positions = {**preserved_paper, **live_positions}
 
     async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> OrderBook:
         async with self.lock:
