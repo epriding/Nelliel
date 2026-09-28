@@ -17,12 +17,31 @@ class TradingState:
         self.markets: Dict[str, MarketInfo] = {}
         self.orderbooks: Dict[str, OrderBook] = {}
         self.positions: Dict[str, Position] = {}
+        self.strategy_positions: Dict[str, Dict[str, Position]] = {}  # strategy -> {key: Position}
         self.open_orders: Dict[str, OrderRecord] = {}
         self.balance: Dict[str, float] = {"USDC": 0.0}
         self.risk_manager: RiskManager = risk_manager
         self.paper_trading: Dict[str, bool] = risk_manager.config.paper_trading
         self.lock = asyncio.Lock()
 
+    def _position_key(self, market_id: str, outcome: str, exchange: str, strategy: str) -> str:
+        mode = "PAPER" if self.paper_trading.get(strategy, False) else "LIVE"
+        return f"{mode}:{exchange}:{market_id}:{outcome}"
+
+    async def update_position(self, position: Position) -> None:
+        """Adds or overwrites a single position. Key encodes paper/live mode
+        so paper and live fills for the same market never merge."""
+        async with self.lock:
+            key = self._position_key(position.market_id, position.outcome, position.exchange, position.strategy)
+            self.positions[key] = position
+
+    async def remove_position(self, market_id: str, outcome: str, exchange: str, strategy: str) -> None:
+        """Removes a position, e.g. when fully closed. Needs strategy now to
+        know whether to remove the paper or live key."""
+        async with self.lock:
+            key = self._position_key(market_id, outcome, exchange, strategy)
+            self.positions.pop(key, None)
+   
     async def update_trading_state(self, market: MarketInfo) -> None:
         async with self.lock:
            self.markets[f'{market.exchange}:{market.market_id}'] = market
@@ -30,18 +49,6 @@ class TradingState:
     async def update_orderbook(self, orderbook: OrderBook) -> None:
         async with self.lock:
             self.orderbooks[f"{orderbook.exchange}:{orderbook.market_id}:{orderbook.outcome}"] = orderbook
-
-    async def update_position(self, position: Position) -> None:
-        """Adds or overwrites a single position."""
-        async with self.lock:
-            key = f"{position.exchange}:{position.market_id}:{position.outcome}"
-            self.positions[key] = position
-
-    async def remove_position(self, market_id: str, outcome: str, exchange: str) -> None:
-        """Removes a position, e.g. when fully closed."""
-        async with self.lock:
-            key = f"{exchange}:{market_id}:{outcome}"
-            self.positions.pop(key, None)
 
     async def update_open_order(self, order: OrderRecord) -> None:
         """Adds or overwrites a single open order."""
@@ -56,25 +63,56 @@ class TradingState:
 
     async def reconcile(self, positions: List[Position], orders: List[OrderRecord]) -> None:
         async with self.lock:
-            preserved_paper = {
-            k: v for k, v in self.positions.items()
-            if self.paper_trading.get(v.strategy, False)
-        }
+            paper_positions = {
+                k: v for k, v in self.positions.items() if k.startswith("PAPER:")
+            }
 
             live_positions = {}
             for p in positions:
-                key = f"{p.exchange}:{p.market_id}:{p.outcome}"
+                key = f"LIVE:{p.exchange}:{p.market_id}:{p.outcome}"
+                strategy_key = f"{p.exchange}:{p.market_id}:{p.outcome}"
                 existing = self.positions.get(key)
 
                 if existing is not None:
-                    p.strategy = existing.strategy  # carry over known attribution
+                    p.strategy = existing.strategy
                 else:
                     pass
-                    #add logging critical warning here oprhan position found
-                    #then sell off postion to cut losses
+                    # orphan position, log critical
+
+                strategies_size = sum(
+                    positions_by_key[strategy_key].size
+                    for strategy, positions_by_key in self.strategy_positions.items()
+                    if not self.paper_trading.get(strategy, False) and strategy_key in positions_by_key
+                )
+                if abs(strategies_size - p.size) > 1e-9:
+                    pass
+                    # log warning: drift for {strategy_key}
+
                 live_positions[key] = p
 
-        self.positions = {**preserved_paper, **live_positions}
+            self.positions = {**paper_positions, **live_positions}
+
+            # --- orders ---
+            paper_orders = {
+                k: v for k, v in self.open_orders.items()
+                if self.paper_trading.get(v.strategy, False)
+            }
+
+            live_orders = {}
+            for o in orders:
+                key = f"{o.exchange}:{o.order_id}"
+                existing = self.open_orders.get(key)
+
+                if existing is not None:
+                    o.strategy = existing.strategy  # carry over local attribution
+                else:
+                    pass
+                    # order exists on exchange but not locally tracked
+                    # log warning: untracked order found — placed outside this bot? crashed before local write?
+
+                live_orders[key] = o
+
+            self.open_orders = {**paper_orders, **live_orders}
 
     async def get_cached_orderbook(self, market_id: str, outcome: str, exchange: str) -> OrderBook:
         async with self.lock:

@@ -75,6 +75,7 @@ class OrderIntent:
     price: float
     strategy: str
     reason: str = ""
+    tif: Optional[str] = None
 
 
 @dataclass
@@ -88,6 +89,7 @@ class OrderRecord:
     price: float
     status: str = "PENDING"
     strategy: str = ""
+    tif: Optional[str] = None
 
 
 @dataclass

@@ -13,6 +13,13 @@ class PolyUsClient(RestClient):
         self.polymarket_api: PolymarketAPI = PolymarketAPI(key_id=key_id, secret_key=secret_key)
         self._slug_cache: Dict[str, str] = {}
         self._market_id_cache: Dict[str, str] = {}
+        self._INTENT_MAP = {
+            "ORDER_INTENT_BUY_LONG":   ("YES", Side.BUY),
+            "ORDER_INTENT_SELL_LONG":  ("YES", Side.SELL),
+            "ORDER_INTENT_BUY_SHORT":  ("NO",  Side.BUY),
+            "ORDER_INTENT_SELL_SHORT": ("NO",  Side.SELL),
+        }
+
 
     async def get_markets(self, active: bool = True, limit: int = 100, offset: int = 0) -> List[MarketInfo]:
         response = await self.polymarket_api.get_markets(active=active, limit=limit, offset=offset)
@@ -73,7 +80,7 @@ class PolyUsClient(RestClient):
 
         return OrderBook(
             market_id=market_id,
-            exchange="polymarket_us",
+            exchange="POLYMARKET_US",
             outcome=outcome,
             bids=bids,
             asks=asks,
@@ -124,3 +131,24 @@ class PolyUsClient(RestClient):
         positions = await self._to_position(raw_positions=raw_positions)
 
         return positions
+
+    async def get_open_orders(self) -> List[OrderRecord]:
+        raw = await self.polymarket_api.get_orders()
+        orders = []
+
+        for order in raw.get("orders", []):
+            outcome, side = self._INTENT_MAP[order["intent"]]
+            orders.append(OrderRecord(
+                order_id=order["id"],
+                market_id=await self._get_market_id(order["marketSlug"]),
+                exchange="POLYMARKET_US",
+                outcome=outcome,
+                side=side,
+                size=float(order["leavesQuantity"]),   # remaining orders left unfilled
+                price=float(order["price"]["value"]),
+                status="PENDING",
+                strategy="",                        # exchange doesn't know strategies; state.reconcile carries it over
+                tif=order["tif"]
+            ))
+
+        return orders
