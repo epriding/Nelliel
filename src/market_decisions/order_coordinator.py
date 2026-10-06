@@ -1,7 +1,7 @@
 from  ..api.interfaces.base_interfaces import RestClient
 from ..market_decisions.risk_manager import RiskManager
 from ..utilities.trading_state import TradingState
-from ..utilities.classes import OrderIntent, OrderRecord, Position
+from ..utilities.classes import OrderIntent, OrderRecord, Position, OrderStatus
 from ..paper_trading.paper_trading_engine import PaperTradingEngine
 from ..utilities.logger import setup_logger
 from typing import Optional
@@ -31,7 +31,7 @@ class OrderCoordinator:
                     #need the polymarket us adapter for the api
                     pass
 
-                if record.status == "FILLED":
+                if record.status == OrderStatus.FILLED:
                     await self._apply_fill(record)
 
                 await self.state.update_open_order(record)
@@ -130,7 +130,7 @@ class OrderCoordinator:
                 await self._apply_fill(OrderRecord(
                     order_id=o.order_id, market_id=o.market_id, exchange=o.exchange,
                     outcome=o.outcome, side=o.side, size=filled_size, price=o.price,
-                    status="FILLED", strategy=o.strategy, tif=o.tif
+                    status=OrderStatus.FILLED, strategy=o.strategy, tif=o.tif
                 ))
 
                 if remaining < 1e-6:
@@ -139,7 +139,7 @@ class OrderCoordinator:
                     await self.state.update_open_order(OrderRecord(
                         order_id=o.order_id, market_id=o.market_id, exchange=o.exchange,
                         outcome=o.outcome, side=o.side, size=remaining, price=o.price,
-                        status="PARTIALLY_FILLED", strategy=o.strategy, tif=o.tif
+                        status=OrderStatus.PARTIALLY_FILLED, strategy=o.strategy, tif=o.tif
                     ))
 
             await self.state.reconcile(live_positions, live_orders)

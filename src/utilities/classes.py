@@ -64,6 +64,24 @@ class MarketInfo:
     volume: float = 0.0
     prices: Dict[str, float] = field(default_factory=dict)
 
+class OrderType(str, Enum):
+    LIMIT = "ORDER_TYPE_LIMIT"
+    MARKET = "ORDER_TYPE_MARKET"
+
+
+class OrderStatus(str, Enum):
+    NEW = "NEW"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+class TimeInForce(str, Enum):
+    GTC = "GTC"   # good till canceled
+    GTD = "GTD"   # good till date
+    IOC = "IOC"   # immediate or cancel
+    FOK = "FOK"   # fill or kill
 
 @dataclass
 class OrderIntent:
@@ -75,7 +93,9 @@ class OrderIntent:
     price: float
     strategy: str
     reason: str = ""
-    tif: Optional[str] = None
+    tif: TimeInForce = TimeInForce.FOK
+    order_type: OrderType = OrderType.LIMIT
+    slippage: Optional[float] = None
 
 
 @dataclass
@@ -87,9 +107,9 @@ class OrderRecord:
     side: Side
     size: float
     price: float
-    status: str = "PENDING"
+    status: OrderStatus = OrderStatus.NEW
     strategy: str = ""
-    tif: Optional[str] = None
+    tif: TimeInForce = TimeInForce.FOK
 
 
 @dataclass

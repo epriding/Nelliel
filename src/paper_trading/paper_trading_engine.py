@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from ..utilities.trading_state import TradingState
-from ..utilities.classes import OrderIntent, MarketInfo, OrderRecord
+from ..utilities.classes import OrderIntent, MarketInfo, OrderRecord, OrderStatus
 import uuid
 
 class PaperTradingEngine:
@@ -23,7 +23,7 @@ class PaperTradingEngine:
             side=order.side,
             size=order.size,
             price=fill_price,
-            status="FILLED",
+            status=OrderStatus.FILLED,
             strategy=order.strategy,
             tif=order.tif
         )

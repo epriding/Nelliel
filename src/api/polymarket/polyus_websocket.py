@@ -1,7 +1,7 @@
 import asyncio 
 from polymarket_us import PolymarketUS
 from websockets.exceptions import ConnectionClosed
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Callable, Any
 import json
 from src.utilities.logger import setup_logger
 
@@ -11,178 +11,150 @@ logger = setup_logger(__name__)
 
 class PolyUSWebsocket():
 
-    def __init__(self, key_id: Optional[str], secret_key: Optional[str]):
+    def __init__(self, key_id: Optional[str], secret_key: Optional[str], handlers: Dict[str, Callable], error_handler: Callable, close_handler: Callable, market_subscriptions: Dict[str, Dict[str, List[str]]] = None):
         #PolymarketUS client information
-        self.key_id = key_id
-        self.secret_key = secret_key
-        self.client = PolymarketUS(key_id=self.key_id, secret_key=self.secret_key)
+        self.key_id: Optional[str] = key_id
+        self.secret_key: Optional[str] = secret_key
+        self.client: PolymarketUS = PolymarketUS(key_id=self.key_id, secret_key=self.secret_key)
+
+        #websockets
+        self._ws: Dict[str, Any] = {} #once its connection function will add the instances
+
+        #Handlers
+        self.handlers: Dict[str, Callable] = handlers
+        self.on_error: Callable = error_handler
+        self.on_close: Callable = close_handler
+
+        #events
+        self.MARKET_EVENTS = {'market_data', 'market_data_lite', 'trade'}
+        self.PRIVATE_EVENTS = {'order_snapshot', 'order_update', 'position_snapshot', 'position_update',
+                                'account_balance_snapshot', 'account_balance_update'}
 
         #Websocket status variables
-        self.market_ws_connected = False
-        self.private_ws_connected = False
+        self._connected: Dict[str, bool] = {'market': False, 'private': False}
+        self._disconnected: Dict[str, asyncio.Event] = {'market': asyncio.Event(), 'private': asyncio.Event()}
+
+        #fix variables if keeping them or delete them
         self.successful_private_ws_close = asyncio.Event()
         self.successful_market_ws_close = asyncio.Event()
 
         #reconnection variables
-        self.reconnected_attemps = 0
-        self.max_reconnect_attempts = 10
-        self.reconnect_delay = 5
-
+        self._attempts: Dict[str, int] = {'market': 0, 'private': 0}
+        self._max_reconnect_attempts: int = 10
+        self._reconnect_delay: int = 5
 
         #Track inputs and outputs
         #subscriptions dictionary structure:
-        self.subscriptions: Dict[ str:
-        Dict[
-            "request_type": Dict[       # consider switching subscription type to key
-                "subscription_type": str,
-                "market_slugs": List[str]
-            ]
-        ]] = {}
-        self.queue = asyncio.Queue()
-        
+        self.market_subscriptions: Dict[str, Dict[str, List[str]]] = market_subscriptions
+        self.private_subscriptions: Dict[str, str] = {
+            'orders': 'SUBSCRIPTION_TYPE_ORDER',
+            'positions': 'SUBCRIPTION_TYPE_POSITION',
+            'balance': 'SUBSCRIPTION_TYPE_ACCOUNT_BALANCE'
+        }
 
-    async def _reconnect(self) -> bool:
-        """Handles reconnection logic for the websocket"""
-        if self.reconnected_attemps < self.max_reconnect_attempts:
-            self.reconnected_attemps += 1
+        #Misc
 
-            logger.debug(f"Attempting to reconnect... ({self.reconnected_attemps}/{self.max_reconnect_attempts})")
+        #Rid map
+        self.RID_MAP = {
+            'SUBSCRIPTION_TYPE_MARKET_DATA': 'market_data',
+            'SUBSCRIPTION_TYPE_MARKET_DATA': 'market_data_lite',
+            'SUBSCRIPTION_TYPE_TRADE': 'trade'
+        }
 
-            await asyncio.sleep(self.reconnect_delay)
-            return True
-            
-        else:
-            logger.error("Max reconnection attempts reached. Please check your connection or credentials.")
-            return False
+    def _register_handlers(self, ws_type: str, ws) -> None:
+        allowed = self.MARKET_EVENTS if ws_type == "market" else self.PRIVATE_EVENTS
+        for event, handler in self.handlers.items():
+            if event in allowed:
+                ws.on(event, handler)
 
-
-    async def _stream_market_websocket(self):
-        """Streams market data from the Polymarket US websocket"""
-        ws = self.client.ws.markets()
-
-        # Register event handlers
-        #replace lambda functions for actual methods to handle the events
-        ws.on("market_data", lambda d: logger.debug(f"Book: {d}"))
-        ws.on("market_data_lite", lambda d: logger.debug(f"BBO: {d}"))
-        ws.on("trade", lambda d: logger.debug(f"Trade: {d}"))
-
-        while True:
-            try:
-                #starts websocket
-                await ws.connect()
-
-                self.market_ws_connected = True
-                logger.debug("Market WebSocket successfully connected!")
-        
-
-                #loads subscriptions
-                for request_type, details in self.subscriptions['market'].items():
-                    await ws.subscribe(request_type, details["subscription_type"], details["market_slugs"])
-
-
-            except (ConnectionClosed, asyncio.TimeoutError) as e:
-                logger.error(f"Secure stream dropped: ({e}). Attemping to reconnect...")
-                status = await self._reconnect()
-
-                if not status:
-                    break  # Exit the loop if reconnection fails
-
-            except KeyboardInterrupt:
-                logger.info("Market WebSocket streaming interrupted by user.")
-                #Add logic to safely close the websocket, get rid of all manual orders
-                #and leave the ride orders
-                self.market_ws_connected = False
-                self.successful_market_ws_close.set()
-                logger.debug("Market WebSocket closed safely.")
-            
-            except Exception as e:
-                logger.error(f"Critical error in secure stream: {e}")
-                raise e 
-
-    async def _stream_private_websocket(self):
-        """Streams private data from the Polymarket US websocket"""
-        ws = self.client.ws.private()
-
-        # Register event handlers
-        #replace lambda functions for actual methods to handle the events
-        ws.on("order_snapshot", lambda d: logger.debug(f"Orders: {d}"))
-        ws.on("order_update", lambda d: logger.debug(f"Order update: {d}"))
-        ws.on("position_snapshot", lambda d: logger.debug(f"Positions: {d}"))
-        ws.on("position_update", lambda d: logger.debug(f"Position update: {d}"))
-        ws.on("account_balance_snapshot", lambda d: logger.debug(f"Balance: {d}"))
-        ws.on("error", lambda e: logger.error(f"Error: {e}"))
-
-        while True:
-            try:
-                #starts websocket
-                await ws.connect()
-
-                self.private_ws_connected = True
-                logger.debug("Private WebSocket successfully connected!")
-
-                #loads subscriptions
-                for request_type, details in self.subscriptions['private'].items():
-                    await ws.subscribe(request_type, details["subscription_type"], details["market_slugs"])
-
-
-            except (ConnectionClosed, asyncio.TimeoutError) as e:
-                logger.error(f"Secure stream dropped: ({e}). Attemping to reconnect...")
-                status = await self._reconnect()
-
-                if not status:
-                    break  # Exit the loop if reconnection fails
-
-            except KeyboardInterrupt:
-                logger.info("Private WebSocket streaming interrupted by user.")
-                #Add logic to safely close the websocket, get rid of all manual orders
-                #and leave the ride orders
-                self.private_ws_connected = False
-                self.successful_private_ws_close.set()
-                logger.debug("Private WebSocket closed safely.")
-
-            except Exception as e:
-                logger.error(f"Critical error in secure stream: {e}")
-                raise e
-
-    async def _stream_both_websockets(self):
-        """Starts the websocket streaming for both market and private data"""
-        tasks = [
-            asyncio.create_task(self._stream_market_websocket()),
-            asyncio.create_task(self._stream_private_websocket())
-        ]
-
-        await asyncio.gather(*tasks)
-
-
-    async def _await_websockets_closed(self):
-        """Waits for both websockets to close"""
-        if not self.private_ws_connected:
-            await self.successful_private_ws_close.wait()
-
-        if not self.market_ws_connected:
-            await self.successful_market_ws_close.wait()
-
-
-    def run(self, private: bool = True, market: bool = True):
-        """Runs the websocket streaming for both market and private data"""
-        try:
-            if not private and not market:
-                logger.error("At least one of 'private' or 'market' must be True.")
+    async def _load_subscriptions(self, ws_type: str, ws) -> None:
+        if ws_type == 'market':
+            if not self.market_subscriptions:
                 return
 
-            elif private == True and market == True:
-                asyncio.run(self._stream_both_websockets())
+            for slug, info in self.market_subscriptions.items():
+                for sub_type in info['sub_types']:
+                    rid = self._get_rid(sub_type=sub_type, slug=slug)
+                    ws.subscribe(rid, sub_type, [slug])
 
-            elif private == True:
-                asyncio.run(self._stream_private_websocket())
+        else:
+            for rid, sub_type in self.private_subscriptions.items():
+                ws.subscribe(rid, sub_type)
+        
+    def _get_rid(self, sub_type: str, slug: str) -> str:
+        """creates the rid for subscriptions"""
+        suffix = self.RID_MAP[sub_type]
+        return f'{slug}:{suffix}'
 
-            elif market == True:
-                asyncio.run(self._stream_market_websocket())
+
+    async def add_market_subscription(self, sub_types: List[str], slug: str) -> None:
+        """Adds a market subscription to the websocket subscription list"""
+        for sub_type in sub_types:
+            rid = self._get_rid(sub_type=sub_type, slug=slug)
+            self._ws['market'].subscribe(rid, sub_type, [slug])
+
+        self.market_subscriptions[slug] = {'sub_type': sub_types, 'slug': slug}
+
+    async def remove_market_subscription(self, slug: str) -> None:
+        """Removes a market subscription"""
+        subscription_data = self.market_subscriptions.pop(slug, None)
+
+        if subscription_data is None:
+            logger.error('Error: failed to fetch market subscription data.')
+            return
+        
+        for sub_type in subscription_data['sub_types']:
+            rid = self._get_rid(slug=slug)
+            self._ws['market'].unsubscribe(rid)
 
 
-        except KeyboardInterrupt:
-            asyncio.run(self._await_websockets_closed())
-            logger.info("Websocket(s) closed safely.")
+    async def _close_websocket(self, ws_type: str) -> None:
+        """Closes websocket"""
+        await self._ws[ws_type].close()
+        del self._ws[ws_type]
 
-        except Exception as e:
-            logger.error(f"Error occurred while streaming both websockets: {e}")
+    async def _connect(self, ws_type: str) -> None:
+        """Connects the websocket to Polymarket US"""
+        ws = self.client.ws.markets() if ws_type == 'market' else self.client.ws.private()
+        self._register_handlers(ws_type=ws_type, ws=ws)
+
+        await ws.connect()
+
+        self._ws[ws_type] = ws
+
+    async def _start_stream(self, ws_type: str) -> None:
+        """Streams market or private data depending on websocket type: ws_type"""
+        try:
+            if ws_type not in self._ws:
+                self._connect
+
+            while True:
+                await self._disconnected[ws_type].wait()
+
+                while True:
+                    if self._attempts[ws_type] >= self._max_reconnect_attempts:
+                        logger.error(f"{ws_type.upper()} WS: max reconnection attempts reached.")
+                        return
+
+                    delay = min(self._reconnect_delay * 2 ** self._attempts[ws_type], 60)
+                    self._attempts[ws_type] += 1
+                    await asyncio.sleep(delay)
+
+                    try:
+                        await self._connect(ws_type=ws_type)
+                        break
+
+                    except (ConnectionClosed, asyncio.Timeout, OSError) as e:
+                        logger.error(f"{ws_type.upper()} WS: reconnect failed: {e}")
+
+        except asyncio.CancelledError:
+            self._close_websocket(ws_type=ws_type)
+            raise
+
+
+    async def start(self) -> None:
+        await self._connect('market')
+        await self._connect('private')
+
+    async def run(self) -> None:
+        await asyncio.gather(self._start_stream('market'), self._start_stream('private'))

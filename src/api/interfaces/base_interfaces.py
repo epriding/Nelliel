@@ -28,7 +28,7 @@ class RestClient(ABC):
         pass
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> None:
+    async def cancel_order(self, order_id: str, market_id: str) -> None:
         pass
 
     @abstractmethod
@@ -50,7 +50,7 @@ class WebsocketClient(ABC):
         pass
 
     @abstractmethod
-    async def subscribe(self, token_ids: List[str]) -> None:
+    async def subscribe(self, market_ids: List[str]) -> None:
         pass
 
     @abstractmethod

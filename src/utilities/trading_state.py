@@ -19,7 +19,7 @@ class TradingState:
         self.positions: Dict[str, Position] = {}
         self.strategy_positions: Dict[str, Dict[str, Position]] = {}  # strategy -> {key: Position}
         self.open_orders: Dict[str, OrderRecord] = {}
-        self.balance: Dict[str, float] = {"USDC": 0.0}
+        self.balance: Dict[str, float] = {"USD": 0.0}
         self.risk_manager: RiskManager = risk_manager
         self.paper_trading: Dict[str, bool] = risk_manager.config.paper_trading
         self.lock = asyncio.Lock()
