@@ -1,8 +1,12 @@
 from polymarket_us import AsyncPolymarketUS
 from typing import Dict
+from ...utilities.logger import setup_logger
 import dotenv
 import os
 import asyncio
+
+
+logger = setup_logger(__name__)
 
 
 dotenv.load_dotenv()

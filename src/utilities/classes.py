@@ -1,25 +1,89 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, List
 from enum import Enum
 
 @dataclass(frozen=True)
-class MarketDataEvent:
+class MarketEvent:
     """Common fields every event carries."""
     market_id: str
     outcome: str
     timestamp: float
     exchange: str
 
+@dataclass(frozen=True)
+class PrivateEvent:
+    """Common fields every private event carries."""
+    exchange: str
+    timestamp: float
 
 @dataclass(frozen=True)
-class BookSnapshotEvent(MarketDataEvent):
+class OrderSnapshotEvent(PrivateEvent):
+    """Snapshot of normalized open orders."""
+    orders: List["OrderRecord"] = field(default_factory=list)
+    complete: bool = True
+
+@dataclass(frozen=True)
+class OrderUpdateEvent(PrivateEvent):
+    """Normalized order state and optional fill information."""
+    order: "OrderRecord"
+    fill_quantity: Optional[float] = None
+    fill_price: Optional[float] = None
+
+@dataclass(frozen=True)
+class PositionSnapshotEvent(PrivateEvent):
+    """Snapshot of normalized open positions."""
+    positions: List["Position"] = field(default_factory=list)
+
+@dataclass(frozen=True)
+class PositionUpdateEvent(PrivateEvent):
+    """A position replacement or removal."""
+    position: Optional["Position"]
+    removed: bool = False
+
+@dataclass(frozen=True)
+class BalanceSnapshotEvent(PrivateEvent):
+    """Snapshot of account balances keyed by currency."""
+    balances: Dict[str, float] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class BalanceUpdateEvent(PrivateEvent):
+    """A normalized account balance change."""
+    currency: str
+    balance: float
+
+@dataclass(frozen=True)
+class OrderBookSnapshotEvent(MarketEvent):
     """Full orderbook replace."""
     bids: Dict[float, float]   # price -> size
     asks: Dict[float, float]
 
 
 @dataclass(frozen=True)
-class PriceChangeEvent(MarketDataEvent):
+class LiteOrderBookSnapshotEvent(MarketEvent):
+    """Top-of-book quote when full depth is unavailable."""
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    last_price: Optional[float] = None
+
+@dataclass(frozen=True)
+class TradeEvent(MarketEvent):
+    """Normalized public or private fill."""
+    price: float
+    quantity: float
+    side: Optional["Side"] = None
+    trade_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RfqEvent(PrivateEvent):
+    """RFQ lifecycle notification using common identifiers."""
+    event_type: str
+    market_id: Optional[str] = None
+    request_id: Optional[str] = None
+    trade: Optional[TradeEvent] = None
+
+@dataclass(frozen=True) # no use for this yet, leaving just in case another exchange uses it
+class PriceChangeEvent(MarketEvent):
     """Incremental update — merge into existing book, don't replace."""
     price: float
     size: float
@@ -34,7 +98,7 @@ class OrderBook:
     asks: Dict[float, float]
     timestamp: float
 
-    def apply_snapshot(self, event: BookSnapshotEvent) -> None:
+    def apply_snapshot(self, event: OrderBookSnapshotEvent) -> None:
         # full replace — snapshot is authoritative
         self.bids = dict(event.bids)
         self.asks = dict(event.asks)
@@ -76,6 +140,7 @@ class OrderStatus(str, Enum):
     CANCELED = "CANCELED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+    UNKNOWN = "UNKNOWN"
 
 class TimeInForce(str, Enum):
     GTC = "GTC"   # good till canceled

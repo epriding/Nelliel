@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Any, Dict
 import asyncio
-from ...utilities.classes import OrderIntent, OrderRecord, Position, MarketInfo, BookSnapshotEvent, PriceChangeEvent
+from ...utilities.classes import OrderIntent, OrderRecord, Position, MarketInfo, OrderBook
 
 class RestClient(ABC):
     """Contract that OrderCoordinator depends on. Real client and
@@ -12,7 +12,7 @@ class RestClient(ABC):
         pass
 
     @abstractmethod
-    async def get_orderbook(self, market_id: str, outcome: str) -> Dict:
+    async def get_orderbook(self, market_id: str, outcome: str) -> OrderBook:
         pass
 
     @abstractmethod
@@ -55,6 +55,5 @@ class WebsocketClient(ABC):
 
     @abstractmethod
     async def run(self) -> None:
-        """Connect, listen, normalize events, push MarketEvent onto self.queue."""
+        """Connect, listen, normalize exchange messages, and queue typed events."""
         pass
-
