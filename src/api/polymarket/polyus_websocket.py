@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from polymarket_us import PolymarketUS
 from websockets.exceptions import ConnectionClosed
 from typing import Dict, Optional, List, Callable, Any, Set
@@ -31,6 +32,7 @@ class PolyUSWebsocket():
         ##Websocket status variables
         self._connected: Dict[str, bool] = {'market': False, 'private': False}
         self._disconnected: Dict[str, asyncio.Event] = {'market': asyncio.Event(), 'private': asyncio.Event()}
+        self._handler_tasks: Dict[str, Set[asyncio.Task]] = {'market': set(), 'private': set()}
 
         ##reconnection variables
         self._attempts: Dict[str, int] = {'market': 0, 'private': 0}
@@ -88,10 +90,34 @@ class PolyUSWebsocket():
         allowed = self.MARKET_EVENTS if ws_type == "market" else self.PRIVATE_EVENTS
         for event, handler in self.handlers.items():
             if event in allowed:
-                ws.on(event, handler)
+                ws.on(event, self._async_handler_callback(ws_type, event, handler))
 
         ws.on('close', lambda *args: self._on_close(ws_type=ws_type, close_data=args[0] if args else {}))
         ws.on('error', lambda data: self._on_error(ws_type=ws_type, error_data=data))
+
+    def _async_handler_callback(self, ws_type: str, event: str, handler: Callable) -> Callable:
+        """Bridge the SDK's synchronous emitter to async event handlers."""
+        def callback(*args):
+            result = handler(*args)
+            if not inspect.isawaitable(result):
+                return
+            task = asyncio.create_task(result, name=f"{ws_type}-ws:{event}")
+            tasks = self._handler_tasks[ws_type]
+            tasks.add(task)
+            task.add_done_callback(lambda done: self._handler_done(ws_type, event, done))
+        return callback
+
+    def _handler_done(self, ws_type: str, event: str, task: asyncio.Task) -> None:
+        self._handler_tasks[ws_type].discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "%s websocket %s handler failed: %s",
+                ws_type.upper(), event, error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def _load_subscriptions(self, ws_type: str, ws) -> None:
         if ws_type == 'market':
@@ -146,6 +172,11 @@ class PolyUSWebsocket():
 
     async def _close_websocket(self, ws_type: str) -> None:
         """Closes websocket"""
+        tasks = list(self._handler_tasks[ws_type])
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self._ws[ws_type] is not None:
             await self._ws[ws_type].close()
             self._ws[ws_type] = None

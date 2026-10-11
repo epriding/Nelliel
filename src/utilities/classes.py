@@ -37,6 +37,7 @@ class PositionSnapshotEvent(PrivateEvent):
 @dataclass(frozen=True)
 class PositionUpdateEvent(PrivateEvent):
     """A position replacement or removal."""
+    market_id: str
     position: Optional["Position"]
     removed: bool = False
 

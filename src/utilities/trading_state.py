@@ -24,23 +24,49 @@ class TradingState:
         self.paper_trading: Dict[str, bool] = risk_manager.config.paper_trading
         self.lock = asyncio.Lock()
 
-    def _position_key(self, market_id: str, outcome: str, exchange: str, strategy: str) -> str:
+    def _position_key(self, market_id: str, exchange: str, strategy: str) -> str:
         mode = "PAPER" if self.paper_trading.get(strategy, False) else "LIVE"
-        return f"{mode}:{exchange}:{market_id}:{outcome}"
+        return f"{mode}:{exchange}:{market_id}"
+
+    @staticmethod
+    def _strategy_position_key(market_id: str, exchange: str) -> str:
+        return f"{exchange}:{market_id}"
+
+    @staticmethod
+    def _signed_position_size(position: Position) -> float:
+        direction = 1.0 if position.outcome.upper() == "YES" else -1.0
+        if position.side.value == "SELL":
+            direction *= -1.0
+        return direction * position.size
 
     async def update_position(self, position: Position) -> None:
         """Adds or overwrites a single position. Key encodes paper/live mode
         so paper and live fills for the same market never merge."""
         async with self.lock:
-            key = self._position_key(position.market_id, position.outcome, position.exchange, position.strategy)
+            key = self._position_key(position.market_id, position.exchange, position.strategy)
             self.positions[key] = position
 
-    async def remove_position(self, market_id: str, outcome: str, exchange: str, strategy: str) -> None:
+    async def remove_position(self, market_id: str, exchange: str, strategy: str) -> None:
         """Removes a position, e.g. when fully closed. Needs strategy now to
         know whether to remove the paper or live key."""
         async with self.lock:
-            key = self._position_key(market_id, outcome, exchange, strategy)
+            key = self._position_key(market_id, exchange, strategy)
             self.positions.pop(key, None)
+
+    async def update_strategy_position(self, position: Position) -> None:
+        async with self.lock:
+            key = self._strategy_position_key(position.market_id, position.exchange)
+            self.strategy_positions.setdefault(position.strategy, {})[key] = position
+
+    async def remove_strategy_position(self, strategy: str, market_id: str, exchange: str) -> None:
+        async with self.lock:
+            key = self._strategy_position_key(market_id, exchange)
+            strategy_positions = self.strategy_positions.get(strategy)
+            if strategy_positions is None:
+                return
+            strategy_positions.pop(key, None)
+            if not strategy_positions:
+                self.strategy_positions.pop(strategy, None)
    
     async def update_trading_state(self, market: MarketInfo) -> None:
         async with self.lock:
@@ -69,8 +95,8 @@ class TradingState:
 
             live_positions = {}
             for p in positions:
-                key = f"LIVE:{p.exchange}:{p.market_id}:{p.outcome}"
-                strategy_key = f"{p.exchange}:{p.market_id}:{p.outcome}"
+                key = f"LIVE:{p.exchange}:{p.market_id}"
+                strategy_key = self._strategy_position_key(p.market_id, p.exchange)
                 existing = self.positions.get(key)
 
                 if existing is not None:
@@ -80,11 +106,11 @@ class TradingState:
                     # orphan position, log critical
 
                 strategies_size = sum(
-                    positions_by_key[strategy_key].size
+                    self._signed_position_size(positions_by_key[strategy_key])
                     for strategy, positions_by_key in self.strategy_positions.items()
                     if not self.paper_trading.get(strategy, False) and strategy_key in positions_by_key
                 )
-                if abs(strategies_size - p.size) > 1e-9:
+                if abs(strategies_size - self._signed_position_size(p)) > 1e-9:
                     pass
                     # log warning: drift for {strategy_key}
 

@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Tuple
 from .base_interfaces import WebsocketClient, RestClient
 from ..polymarket.polyUS_api import PolymarketAPI
 from ..polymarket.polyus_websocket import PolyUSWebsocket
@@ -14,16 +14,22 @@ from ...utilities.classes import (
 )
 from ...utilities.logger import setup_logger
 import time
+import math
 
 
 logger = setup_logger(__name__)
 
 
 class PolyUsClient(RestClient):
-    def __init__(self, key_id: str, secret_key: str):
+    def __init__(
+        self,
+        key_id: str,
+        secret_key: str,
+        market_id_by_slug: Optional[Dict[str, str]] = None,
+    ):
         self.polymarket_api: PolymarketAPI = PolymarketAPI(key_id=key_id, secret_key=secret_key)
         self._slug_cache: Dict[str, str] = {}
-        self._market_id_cache: Dict[str, str] = {}
+        self._market_id_by_slug = market_id_by_slug if market_id_by_slug is not None else {}
         self._INTENT_MAP = {
             "ORDER_INTENT_BUY_LONG":   ("YES", Side.BUY),
             "ORDER_INTENT_SELL_LONG":  ("YES", Side.SELL),
@@ -63,6 +69,8 @@ class PolyUsClient(RestClient):
         markets = []
 
         for market in market_details:
+            self._market_id_by_slug[market.slug] = market.id
+            self._slug_cache[market.id] = market.slug
             yes_side, no_side = market.marketSides
             market_info = MarketInfo(
                 market_id=market.id,
@@ -93,19 +101,29 @@ class PolyUsClient(RestClient):
         if slug is not None:
             return slug
 
+        slug = next(
+            (slug for slug, cached_market_id in self._market_id_by_slug.items()
+             if cached_market_id == market_id),
+            None,
+        )
+        if slug is not None:
+            self._slug_cache[market_id] = slug
+            return slug
+
         market = await self.polymarket_api.get_market(market_id=market_id)
         self._slug_cache[market_id] = market.slug
+        self._market_id_by_slug[market.slug] = market.id
 
         return market.slug
 
     async def _get_market_id(self, slug: str) -> str:
-        market_id = self._market_id_cache.get(slug)
+        market_id = self._market_id_by_slug.get(slug)
         if market_id is not None:
             return market_id
 
         market = await self.polymarket_api.get_market_by_slug(slug=slug)
         market_id = market.id
-        self._market_id_cache[slug] = market_id
+        self._market_id_by_slug[slug] = market_id
         self._slug_cache[market_id] = slug  # populate the reverse cache too
         return market_id
 
@@ -130,7 +148,10 @@ class PolyUsClient(RestClient):
         positions = []
 
         for slug, raw in raw_positions.get("positions", {}).items():
-            net = Decimal(raw.netPosition)
+            net_position = getattr(raw, "netPositionDecimal", None)
+            if net_position is None:
+                net_position = getattr(raw, "netPosition")
+            net = Decimal(str(net_position))
             if net == 0:
                 continue
 
@@ -256,8 +277,13 @@ class PolyUsClient(RestClient):
 
 
 class PolyUsWebsocketClient(WebsocketClient):
-    def __init__(self, key_id: Optional[str], secret_key: Optional[str]):
-        self._market_id_by_slug: Dict[str, str] = {}
+    def __init__(
+        self,
+        key_id: Optional[str],
+        secret_key: Optional[str],
+        market_id_by_slug: Optional[Dict[str, str]] = None,
+    ):
+        self._market_id_by_slug = market_id_by_slug if market_id_by_slug is not None else {}
         self._INTENT_MAP = {
             "ORDER_INTENT_BUY_LONG": ("YES", Side.BUY),
             "ORDER_INTENT_SELL_LONG": ("YES", Side.SELL),
@@ -285,40 +311,94 @@ class PolyUsWebsocketClient(WebsocketClient):
 
     @staticmethod
     def _amount(value) -> float:
-        """Extract the numeric value from the SDK's Amount shape or a scalar."""
+        """Parse a scalar or API Amount object; reject absent/malformed values."""
         if isinstance(value, dict):
-            value = value.get("value", 0)
-        return float(value or 0)
+            if "value" not in value:
+                raise ValueError("amount object is missing 'value'")
+            value = value["value"]
+        if isinstance(value, bool) or value is None or value == "":
+            raise ValueError("amount must be a number")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid amount {value!r}") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"amount must be finite, got {value!r}")
+        return number
 
     @staticmethod
     def _timestamp(value) -> float:
-        if not value:
+        if value is None or value == "":
             return time.time()
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result = float(value)
+            if math.isfinite(result):
+                return result
+            raise ValueError(f"invalid timestamp {value!r}")
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            result = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
         except (AttributeError, TypeError, ValueError):
             try:
-                return float(value)
-            except (TypeError, ValueError):
-                return time.time()
+                result = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid timestamp {value!r}") from exc
+        if not math.isfinite(result):
+            raise ValueError(f"invalid timestamp {value!r}")
+        return result
 
-    def _handle_market_data(self, message: Dict) -> None:
-        """Convert a Polymarket US full-book message into YES and NO snapshots."""
-        payload = message.get("marketData", {})
-        slug = payload.get("marketSlug")
+    async def _resolve_market_id(
+        self, slug: Optional[str], event_name: str, market_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Resolve/cache a slug via REST when the shared market cache misses."""
+        if isinstance(market_id, str) and market_id.strip():
+            return market_id
+        if not isinstance(slug, str) or not slug.strip():
+            logger.warning("Dropping Polymarket US %s event: missing market slug/ID", event_name)
+            return None
         market_id = self._market_id_by_slug.get(slug)
+        if market_id:
+            return market_id
+        try:
+            market = await self.polymarket_api.get_market_by_slug(slug=slug)
+            resolved_id = getattr(market, "id", None)
+            resolved_slug = getattr(market, "slug", None)
+            if not isinstance(resolved_id, str) or not resolved_id.strip():
+                raise ValueError("market lookup returned no ID")
+            self._market_id_by_slug[slug] = resolved_id
+            if isinstance(resolved_slug, str) and resolved_slug:
+                self._market_id_by_slug[resolved_slug] = resolved_id
+            return resolved_id
+        except Exception as exc:
+            logger.warning(
+                "Dropping Polymarket US %s event: could not resolve slug %r: %s",
+                event_name, slug, exc,
+            )
+            return None
+
+    async def _handle_market_data(self, message: Dict) -> None:
+        """Convert a Polymarket US full-book message into YES and NO snapshots."""
+        payload = message.get("marketData") if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("bids"), list) or not isinstance(payload.get("offers"), list):
+            logger.warning("Dropping malformed Polymarket US market data message")
+            return
+        slug = payload.get("marketSlug")
+        market_id = await self._resolve_market_id(slug, "market data", payload.get("marketId"))
         if not market_id:
             return
 
         try:
-            yes_bids = {
-                self._amount(level.get("px")): self._amount(level.get("qty"))
-                for level in payload.get("bids", [])
-            }
-            yes_asks = {
-                self._amount(level.get("px")): self._amount(level.get("qty"))
-                for level in payload.get("offers", [])
-            }
+            def parse_levels(levels):
+                result = {}
+                for level in levels:
+                    if not isinstance(level, dict) or "px" not in level or "qty" not in level:
+                        raise ValueError("book level requires px and qty")
+                    price, quantity = self._amount(level["px"]), self._amount(level["qty"])
+                    if quantity < 0:
+                        raise ValueError("book quantity cannot be negative")
+                    result[price] = quantity
+                return result
+            yes_bids = parse_levels(payload["bids"])
+            yes_asks = parse_levels(payload["offers"])
             timestamp = self._timestamp(payload.get("transactTime"))
 
             self.queue.put_nowait(OrderBookSnapshotEvent(
@@ -327,22 +407,33 @@ class PolyUsWebsocketClient(WebsocketClient):
                 bids=yes_bids, asks=yes_asks,
             ))
             # The US API publishes a YES-denominated book; derive the complementary NO book.
-            no_bids = {1.0 - price: size for price, size in yes_asks.items()}
-            no_asks = {1.0 - price: size for price, size in yes_bids.items()}
+            no_bids = {round(1.0 - price, 6): size for price, size in yes_asks.items()}
+            no_asks = {round(1.0 - price, 6): size for price, size in yes_bids.items()}
             self.queue.put_nowait(OrderBookSnapshotEvent(
                 exchange="POLYMARKET_US", timestamp=timestamp,
                 market_id=market_id, outcome="NO",
                 bids=no_bids, asks=no_asks,
             ))
         except (AttributeError, TypeError, ValueError) as exc:
-            logger.error("Invalid Polymarket US market data message: %s", exc)
+            logger.warning("Dropping malformed Polymarket US market data message: %s", exc)
 
-    def _market_event_fields(self, payload: Dict, outcome: Optional[str] = None) -> Dict:
+    async def _market_event_fields(self, payload: Dict, event_name: str, outcome: Optional[str] = None) -> Optional[Dict]:
+        if not isinstance(payload, dict):
+            logger.warning("Dropping malformed Polymarket US %s message", event_name)
+            return None
         slug = payload.get("marketSlug")
+        market_id = await self._resolve_market_id(slug, event_name, payload.get("marketId"))
+        if market_id is None:
+            return None
+        try:
+            timestamp = self._timestamp(payload.get("transactTime") or payload.get("tradeTime"))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Dropping malformed Polymarket US %s timestamp: %s", event_name, exc)
+            return None
         return {
-            "market_id": self._market_id_by_slug.get(slug, slug or ""),
+            "market_id": market_id,
             "outcome": outcome or "YES",
-            "timestamp": self._timestamp(payload.get("transactTime") or payload.get("tradeTime")),
+            "timestamp": timestamp,
             "exchange": "POLYMARKET_US",
         }
 
@@ -364,49 +455,74 @@ class PolyUsWebsocketClient(WebsocketClient):
                     return slug
         return None
 
-    def _handle_market_data_lite(self, message: Dict) -> None:
-        payload = message.get("marketDataLite", {})
+    async def _handle_market_data_lite(self, message: Dict) -> None:
+        payload = message.get("marketDataLite") if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not any(k in payload for k in ("bestBid", "bestAsk", "currentPx", "lastTradePx")):
+            logger.warning("Dropping malformed Polymarket US lite market data message")
+            return
+        event_fields = await self._market_event_fields(payload, "lite market data")
+        if event_fields is None:
+            return
         try:
             self.queue.put_nowait(LiteOrderBookSnapshotEvent(
-                **self._market_event_fields(payload),
-                best_bid=self._amount(payload.get("bestBid")) if payload.get("bestBid") else None,
-                best_ask=self._amount(payload.get("bestAsk")) if payload.get("bestAsk") else None,
-                last_price=self._amount(payload.get("currentPx") or payload.get("lastTradePx"))
-                if payload.get("currentPx") or payload.get("lastTradePx") else None,
+                **event_fields,
+                best_bid=self._amount(payload["bestBid"]) if payload.get("bestBid") is not None else None,
+                best_ask=self._amount(payload["bestAsk"]) if payload.get("bestAsk") is not None else None,
+                last_price=self._amount(payload["currentPx"] if payload.get("currentPx") is not None else payload["lastTradePx"])
+                if payload.get("currentPx") is not None or payload.get("lastTradePx") is not None else None,
             ))
         except (AttributeError, TypeError, ValueError) as exc:
-            logger.error("Invalid Polymarket US lite market data message: %s", exc)
+            logger.warning("Dropping malformed Polymarket US lite market data message: %s", exc)
 
-    def _handle_trade(self, message: Dict) -> None:
-        payload = message.get("trade", {})
-        maker = payload.get("maker", {})
-        intent = maker.get("intent", "ORDER_INTENT_BUY_LONG")
-        outcome = "NO" if intent.endswith("SHORT") else "YES"
+    async def _handle_trade(self, message: Dict) -> None:
+        payload = message.get("trade") if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("maker"), dict) or not isinstance(payload.get("taker"), dict):
+            logger.warning("Dropping malformed Polymarket US trade message")
+            return
+        intent = payload["maker"].get("intent")
+        taker_side = payload["taker"].get("side")
+        if intent not in self._INTENT_MAP or taker_side not in ("ORDER_SIDE_BUY", "ORDER_SIDE_SELL"):
+            logger.warning("Dropping malformed Polymarket US trade message: invalid intent/side")
+            return
+        outcome = self._INTENT_MAP[intent][0]
+        event_fields = await self._market_event_fields(payload, "trade", outcome)
+        if event_fields is None:
+            return
         try:
             self.queue.put_nowait(TradeEvent(
-                **self._market_event_fields(payload, outcome),
+                **event_fields,
                 trade_id=payload.get("tradeId"),
-                price=self._amount(payload.get("price")),
-                quantity=self._amount(payload.get("quantity")),
-                side=Side.BUY if payload.get("taker", {}).get("side", "ORDER_SIDE_BUY").endswith("BUY") else Side.SELL,
+                price=self._amount(payload["price"]),
+                quantity=self._amount(payload["quantity"]),
+                side=Side.BUY if taker_side == "ORDER_SIDE_BUY" else Side.SELL,
             ))
         except (AttributeError, TypeError, ValueError) as exc:
-            logger.error("Invalid Polymarket US trade message: %s", exc)
+            logger.warning("Dropping malformed Polymarket US trade message: %s", exc)
 
-    def _to_order_record(self, raw: Dict) -> OrderRecord:
-        outcome, side = self._INTENT_MAP.get(raw.get("intent"), ("YES", Side.BUY))
-        price = raw.get("price", {})
-        if isinstance(price, dict):
-            price = price.get("value", 0)
-        size = raw.get("leavesQuantity")
-        if size is None:
-            size = raw.get("quantity", raw.get("cumQuantity", 0))
+    async def _to_order_record(self, raw: Dict) -> Optional[OrderRecord]:
+        if not isinstance(raw, dict):
+            raise ValueError("order must be an object")
+        market_id = await self._resolve_market_id(raw.get("marketSlug"), "order", raw.get("marketId"))
+        if market_id is None:
+            return None
+        intent = raw.get("intent")
+        if intent not in self._INTENT_MAP:
+            raise ValueError("order has missing or unknown intent")
+        if not isinstance(raw.get("id"), str) or not raw["id"]:
+            raise ValueError("order has no ID")
+        size = raw.get("leavesQuantity", raw.get("quantity", raw.get("cumQuantity")))
+        if size is None or "price" not in raw or not raw.get("state") or not raw.get("tif"):
+            raise ValueError("order is missing price, quantity, state, or time-in-force")
+        outcome, side = self._INTENT_MAP[intent]
+        tif = self._websocket_tif(raw["tif"])
+        if tif is None:
+            raise ValueError(f"order has unknown time-in-force {raw['tif']!r}")
         return OrderRecord(
-            order_id=str(raw.get("id", "")), market_id=self._market_id_by_slug.get(raw.get("marketSlug"), raw.get("marketSlug", "")),
+            order_id=raw["id"], market_id=market_id,
             exchange="POLYMARKET_US", outcome=outcome, side=side,
-            size=self._amount(size), price=self._amount(price),
-            status=self._websocket_order_status(raw.get("state", "")),
-            tif=self._websocket_tif(raw.get("tif", "")),
+            size=self._amount(size), price=self._amount(raw["price"]),
+            status=self._websocket_order_status(raw["state"]),
+            tif=tif,
         )
 
     @staticmethod
@@ -432,124 +548,216 @@ class PolyUsWebsocketClient(WebsocketClient):
             "TIME_IN_FORCE_GOOD_TILL_DATE": TimeInForce.GTD,
             "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL": TimeInForce.IOC,
             "TIME_IN_FORCE_FILL_OR_KILL": TimeInForce.FOK,
-        }.get(tif, TimeInForce.FOK)
+        }.get(tif)
 
-    def _handle_order_snapshot(self, message: Dict) -> None:
-        payload = message.get("orderSubscriptionSnapshot", {})
+    async def _handle_order_snapshot(self, message: Dict) -> None:
+        payload = message.get("orderSubscriptionSnapshot") if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("orders"), list) or not isinstance(payload.get("eof"), bool):
+            logger.warning("Dropping malformed Polymarket US order snapshot")
+            return
+        orders = []
+        skipped_order = False
+        for raw_order in payload.get("orders", []):
+            try:
+                order = await self._to_order_record(raw_order)
+                if order is not None:
+                    orders.append(order)
+                else:
+                    skipped_order = True
+            except (AttributeError, TypeError, ValueError) as exc:
+                skipped_order = True
+                logger.warning("Skipping malformed Polymarket US order in snapshot: %s", exc)
         self.queue.put_nowait(OrderSnapshotEvent(
             exchange="POLYMARKET_US", timestamp=time.time(),
-            orders=[self._to_order_record(order) for order in payload.get("orders", [])],
-            complete=payload.get("eof", False),
+            orders=orders,
+            complete=payload["eof"] and not skipped_order,
         ))
 
-    def _handle_order_update(self, message: Dict) -> None:
-        payload = message.get("orderSubscriptionUpdate", {})
-        execution = payload.get("execution", {})
-        raw_order = execution.get("order", {})
-        order = self._to_order_record(raw_order) if raw_order else None
-        fill = None
-        if order is not None and execution.get("lastShares") is not None:
-            fill_quantity = self._amount(execution.get("lastShares"))
-            fill_price = self._amount(execution.get("lastPx"))
-        else:
-            fill_quantity = fill_price = None
-        if order is None:
+    async def _handle_order_update(self, message: Dict) -> None:
+        payload = message.get("orderSubscriptionUpdate") if isinstance(message, dict) else None
+        execution = payload.get("execution") if isinstance(payload, dict) else None
+        raw_order = execution.get("order") if isinstance(execution, dict) else None
+        if not isinstance(raw_order, dict):
+            logger.warning("Dropping malformed Polymarket US order update: missing order")
             return
-        self.queue.put_nowait(OrderUpdateEvent(
-            exchange="POLYMARKET_US", timestamp=time.time(),
-            order=order, fill_quantity=fill_quantity, fill_price=fill_price,
-        ))
+        try:
+            order = await self._to_order_record(raw_order)
+            if order is None:
+                return
+            fill_quantity = fill_price = None
+            if execution.get("lastShares") is not None:
+                if execution.get("lastPx") is None:
+                    raise ValueError("execution has lastShares but no lastPx")
+                fill_quantity = self._amount(execution["lastShares"])
+                fill_price = self._amount(execution["lastPx"])
+            self.queue.put_nowait(OrderUpdateEvent(
+                exchange="POLYMARKET_US", timestamp=time.time(), order=order,
+                fill_quantity=fill_quantity, fill_price=fill_price,
+            ))
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Dropping malformed Polymarket US order update: %s", exc)
 
-    def _handle_position_snapshot(self, message: Dict) -> None:
-        payload = message.get("positionSubscriptionSnapshot", {})
-        raw_positions = payload.get("positions", [])
+    async def _handle_position_snapshot(self, message: Dict) -> None:
+        payload = message.get("positionSubscriptionSnapshot") if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("positions"), (list, dict)):
+            logger.warning("Dropping malformed Polymarket US position snapshot")
+            return
+        raw_positions = payload["positions"]
         if isinstance(raw_positions, dict):
-            raw_positions = list(raw_positions.values())
-        positions = [
-            position for raw in raw_positions
-            if (position := self._position_from_payload(raw)) is not None
-        ]
+            raw_positions = [
+                {"marketSlug": slug, **position} if isinstance(position, dict) else position
+                for slug, position in raw_positions.items()
+            ]
+        positions = []
+        for raw in raw_positions:
+            try:
+                if not isinstance(raw, dict):
+                    raise ValueError("position must be an object")
+                slug = self._find_market_slug(raw)
+                market_id = await self._resolve_market_id(slug, "position snapshot", raw.get("marketId"))
+                if market_id is None:
+                    return
+                position = self._position_from_payload(raw, market_id)
+                if position is not None:
+                    positions.append(position)
+            except (AttributeError, TypeError, ValueError) as exc:
+                logger.warning("Dropping malformed Polymarket US position snapshot: %s", exc)
+                return
         self.queue.put_nowait(PositionSnapshotEvent(
             exchange="POLYMARKET_US", timestamp=time.time(), positions=positions,
         ))
 
-    def _handle_position_update(self, message: Dict) -> None:
-        payload = message.get("positionSubscription", message.get("positionSubscriptionUpdate", {}))
-        self._handle_position_payload(payload)
-
-    def _handle_position_payload(self, payload: Dict) -> None:
-        position = self._position_from_payload(payload)
-        if position is None and not self._find_market_slug(payload):
+    async def _handle_position_update(self, message: Dict) -> None:
+        payload = message.get("positionSubscription", message.get("positionSubscriptionUpdate")) if isinstance(message, dict) else None
+        if not isinstance(payload, dict):
+            logger.warning("Dropping malformed Polymarket US position update")
             return
-        self.queue.put_nowait(PositionUpdateEvent(
-            exchange="POLYMARKET_US", timestamp=self._timestamp(payload.get("updateTime")),
-            position=position, removed=position is None,
-        ))
-
-    def _position_from_payload(self, payload: Dict) -> Optional[Position]:
-        after = payload.get("afterPosition", payload)
         slug = self._find_market_slug(payload)
-        if not slug:
-            return None
-        market_id = self._market_id_by_slug.get(slug, slug)
-        net = self._amount(after.get("netPositionDecimal", after.get("netPosition", 0)))
+        market_id = await self._resolve_market_id(slug, "position update", payload.get("marketId"))
+        if market_id is None:
+            return
+        try:
+            position = self._position_from_payload(payload, market_id)
+            self.queue.put_nowait(PositionUpdateEvent(
+                exchange="POLYMARKET_US", timestamp=self._timestamp(payload.get("updateTime")),
+                market_id=market_id, position=position, removed=position is None,
+            ))
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Dropping malformed Polymarket US position update: %s", exc)
+
+    def _position_from_payload(self, payload: Dict, market_id: Optional[str] = None) -> Optional[Position]:
+        after = payload.get("afterPosition", payload)
+        if not isinstance(after, dict):
+            raise ValueError("position afterPosition must be an object")
+        if market_id is None:
+            raise ValueError("position has no resolved market ID")
+        net_value = after.get("netPositionDecimal", after.get("netPosition"))
+        if net_value is None:
+            raise ValueError("position has no net position")
+        net = self._amount(net_value)
         if net == 0:
             return None
         outcome = "YES" if net > 0 else "NO"
         quantity_bought = self._amount(after.get("qtyBoughtDecimal", abs(net)))
-        cost = self._amount(after.get("cost", {}).get("value", after.get("cost", 0)))
+        cost_value = after.get("cost")
+        if cost_value is None:
+            raise ValueError("position has no cost")
+        cost = self._amount(cost_value)
+        if quantity_bought <= 0 or cost < 0:
+            raise ValueError("position quantity must be positive and cost cannot be negative")
         return Position(
             market_id=market_id, exchange="POLYMARKET_US", outcome=outcome,
             size=abs(net), entry_price=cost / quantity_bought if quantity_bought else 0.0,
             side=Side.BUY, strategy="",
         )
 
-    def _handle_account_balance_snapshot(self, message: Dict) -> None:
-        payload = message.get("accountBalancesSnapshot", message.get("accountBalanceSubscriptionSnapshot", {}))
+    async def _handle_account_balance_snapshot(self, message: Dict) -> None:
+        payload = message.get("accountBalancesSnapshot", message.get("accountBalanceSubscriptionSnapshot")) if isinstance(message, dict) else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("balances"), list):
+            logger.warning("Dropping malformed Polymarket US balance snapshot")
+            return
         balances = {}
-        for item in payload.get("balances", []):
-            currency = item.get("currency", "USD")
-            balances[currency] = self._amount(item.get("buyingPower", item.get("currentBalance")))
+        for item in payload["balances"]:
+            try:
+                if not isinstance(item, dict) or not isinstance(item.get("currency"), str) or not item["currency"]:
+                    raise ValueError("balance requires currency")
+                amount = item.get("buyingPower", item.get("currentBalance"))
+                if amount is None:
+                    raise ValueError("balance requires buyingPower/currentBalance")
+                balances[item["currency"]] = self._amount(amount)
+            except (AttributeError, TypeError, ValueError) as exc:
+                logger.warning("Skipping malformed Polymarket US balance snapshot item: %s", exc)
         self.queue.put_nowait(BalanceSnapshotEvent(
             exchange="POLYMARKET_US", timestamp=time.time(), balances=balances
         ))
 
-    def _handle_account_balance_update(self, message: Dict) -> None:
-        payload = message.get("accountBalancesUpdate", message.get("accountBalanceSubscriptionUpdate", {}))
-        change = payload.get("balanceChange", payload)
-        after = change.get("afterBalance", {})
-        currency = after.get("currency", "USD")
-        self.queue.put_nowait(BalanceUpdateEvent(
-            exchange="POLYMARKET_US", timestamp=self._timestamp(change.get("updateTime")),
-            currency=currency,
-            balance=self._amount(after.get("buyingPower", after.get("currentBalance", after.get("balance", 0)))),
-        ))
+    async def _handle_account_balance_update(self, message: Dict) -> None:
+        payload = message.get("accountBalancesUpdate", message.get("accountBalanceSubscriptionUpdate")) if isinstance(message, dict) else None
+        change = payload.get("balanceChange") if isinstance(payload, dict) else None
+        after = change.get("afterBalance") if isinstance(change, dict) else None
+        if not isinstance(after, dict) or not isinstance(after.get("currency"), str) or not after["currency"]:
+            logger.warning("Dropping malformed Polymarket US balance update")
+            return
+        try:
+            amount = after.get("buyingPower", after.get("currentBalance", after.get("balance")))
+            if amount is None:
+                raise ValueError("balance has no amount")
+            self.queue.put_nowait(BalanceUpdateEvent(
+                exchange="POLYMARKET_US", timestamp=self._timestamp(change.get("updateTime")),
+                currency=after["currency"], balance=self._amount(amount),
+            ))
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Dropping malformed Polymarket US balance update: %s", exc)
 
-    def _handle_rfq_event(self, message: Dict) -> None:
-        envelope = message.get("rfqEvent", {})
-        if not envelope:
+    async def _handle_rfq_event(self, message: Dict) -> None:
+        envelope = message.get("rfqEvent") if isinstance(message, dict) else None
+        if not isinstance(envelope, dict) or len(envelope) != 1:
+            logger.warning("Dropping malformed Polymarket US RFQ message")
             return
         event_type, payload = next(iter(envelope.items()))
+        if not isinstance(payload, dict):
+            logger.warning("Dropping malformed Polymarket US RFQ message: payload is not an object")
+            return
+        raw_trade = payload.get("trade") if event_type == "rfqTrade" else None
+        if event_type == "rfqTrade" and not isinstance(raw_trade, dict):
+            logger.warning("Dropping malformed Polymarket US RFQ trade: missing trade")
+            return
         slug = self._find_market_slug(payload)
-        raw_trade = payload.get("trade", {}) if event_type == "rfqTrade" else {}
+        if slug is None:
+            rfq = payload.get("rfq")
+            if isinstance(rfq, dict):
+                slug = rfq.get("symbol")
+        # RFQ trade messages identify the instrument by symbol rather than marketSlug.
+        if slug is None and isinstance(raw_trade, dict):
+            slug = raw_trade.get("symbol")
+        market_id = await self._resolve_market_id(slug, "RFQ") if slug else None
         trade = None
-        if raw_trade:
-            trade = TradeEvent(
-                exchange="POLYMARKET_US",
-                timestamp=self._timestamp(raw_trade.get("executedTime")),
-                market_id=self._market_id_by_slug.get(slug, raw_trade.get("symbol", "")),
-                outcome="YES",
-                trade_id=raw_trade.get("tradeId"),
-                price=self._amount(raw_trade.get("price")),
-                quantity=self._amount(raw_trade.get("qtyDecimal")),
-                side=Side.BUY if raw_trade.get("aggressorSide", "SIDE_BUY").endswith("BUY") else Side.SELL,
-            )
+        if raw_trade is not None:
+            if market_id is None:
+                return
+            try:
+                aggressor_side = raw_trade.get("aggressorSide")
+                if aggressor_side not in ("SIDE_BUY", "SIDE_SELL"):
+                    raise ValueError("RFQ trade has invalid aggressorSide")
+                trade = TradeEvent(
+                    exchange="POLYMARKET_US", timestamp=self._timestamp(raw_trade.get("executedTime")),
+                    market_id=market_id, outcome="UNKNOWN",
+                    trade_id=raw_trade.get("tradeId"), price=self._amount(raw_trade.get("price")),
+                    quantity=self._amount(raw_trade.get("qtyDecimal")),
+                    side=Side.BUY if aggressor_side == "SIDE_BUY" else Side.SELL,
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                logger.warning("Dropping malformed Polymarket US RFQ trade: %s", exc)
+                return
+        try:
+            timestamp = self._timestamp(payload.get("executedTime") or payload.get("updateTime"))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Dropping malformed Polymarket US RFQ timestamp: %s", exc)
+            return
         self.queue.put_nowait(RfqEvent(
-            exchange="POLYMARKET_US", timestamp=self._timestamp(
-                payload.get("executedTime") or payload.get("updateTime")
-            ), event_type=event_type, request_id=message.get("requestId"),
-            market_id=self._market_id_by_slug.get(slug) if slug else None,
-            trade=trade,
+            exchange="POLYMARKET_US", timestamp=timestamp,
+            event_type=event_type, request_id=message.get("requestId"),
+            market_id=market_id, trade=trade,
         ))
 
     async def start(self) -> None:
@@ -564,6 +772,7 @@ class PolyUsWebsocketClient(WebsocketClient):
             if cached_slug is None:
                 market = await self.polymarket_api.get_market(market_id)
                 slug = market.slug
+                market_id = market.id
             else:
                 slug = cached_slug
             self._market_id_by_slug[slug] = market_id
@@ -576,3 +785,15 @@ class PolyUsWebsocketClient(WebsocketClient):
         if not any(self.websocket._connected.values()):
             await self.start()
         await self.websocket.run()
+
+
+def create_poly_us_clients(
+    key_id: str,
+    secret_key: str,
+) -> Tuple[PolyUsClient, PolyUsWebsocketClient]:
+    """Build REST and websocket clients with one shared slug-to-market-ID map."""
+    market_id_by_slug: Dict[str, str] = {}
+    return (
+        PolyUsClient(key_id, secret_key, market_id_by_slug),
+        PolyUsWebsocketClient(key_id, secret_key, market_id_by_slug),
+    )

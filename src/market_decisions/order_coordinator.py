@@ -1,7 +1,7 @@
 from  ..api.interfaces.base_interfaces import RestClient
 from ..market_decisions.risk_manager import RiskManager
 from ..utilities.trading_state import TradingState
-from ..utilities.classes import OrderIntent, OrderRecord, Position, OrderStatus
+from ..utilities.classes import OrderIntent, OrderRecord, Position, OrderStatus, Side
 from ..paper_trading.paper_trading_engine import PaperTradingEngine
 from ..utilities.logger import setup_logger
 from typing import Optional
@@ -38,48 +38,74 @@ class OrderCoordinator:
                 return record
 
     def _merge_position(self, existing: Optional[Position], order: OrderRecord) -> Optional[Position]:
-        """Returns the new/updated Position, or None if the fill fully closes it."""
+        """Net YES and NO contract exposure into one market position."""
+        incoming_sign = self._signed_order_size(order) / order.size if order.size else 0.0
+        incoming_outcome = "YES" if incoming_sign > 0 else "NO"
+        # Store prices in the units of the resulting net outcome. Selling either
+        # outcome is equivalent to buying its complement.
+        incoming_price = order.price if order.side == Side.BUY else 1.0 - order.price
         if existing is None:
             return Position(
                 market_id=order.market_id,
                 exchange=order.exchange,
-                outcome=order.outcome,
+                outcome=incoming_outcome,
                 size=order.size,
-                entry_price=order.price,
-                side=order.side,
+                entry_price=incoming_price,
+                side=Side.BUY,
                 strategy=order.strategy,
             )
-        elif existing.side == order.side:
+        existing_signed_size = self.state._signed_position_size(existing)
+        incoming_signed_size = self._signed_order_size(order)
+        if existing_signed_size * incoming_signed_size > 0:
             total_size = existing.size + order.size
-            avg_price = ((existing.entry_price * existing.size) + (order.price * order.size)) / total_size
+            avg_price = (
+                existing.entry_price * existing.size + incoming_price * order.size
+            ) / total_size
             existing.size = total_size
+            existing.outcome = incoming_outcome
+            existing.side = Side.BUY
             existing.entry_price = avg_price
             return existing
-        else:
-            if order.size < existing.size:
-                existing.size -= order.size
-                return existing
-            elif order.size == existing.size:
-                return None
-            else:
-                raise NotImplementedError("Position flip not handled yet")
+
+        remaining = existing.size - order.size
+        if remaining > 1e-12:
+            existing.size = remaining
+            return existing
+        if abs(remaining) <= 1e-12:
+            return None
+        return Position(
+            market_id=order.market_id,
+            exchange=order.exchange,
+            outcome=incoming_outcome,
+            size=abs(remaining),
+            entry_price=incoming_price,
+            side=Side.BUY,
+            strategy=order.strategy,
+        )
+
+    @staticmethod
+    def _signed_order_size(order: OrderRecord) -> float:
+        direction = 1.0 if order.outcome.upper() == "YES" else -1.0
+        if order.side == Side.SELL:
+            direction *= -1.0
+        return direction * order.size
 
 
     async def _apply_fill(self, order: OrderRecord) -> None:
-        key = self.state._position_key(order.market_id, order.outcome, order.exchange, order.strategy)
+        key = self.state._position_key(order.market_id, order.exchange, order.strategy)
 
         result = self._merge_position(self.state.positions.get(key), order)
         if result is None:
-            await self.state.remove_position(order.market_id, order.outcome, order.exchange, order.strategy)
+            await self.state.remove_position(order.market_id, order.exchange, order.strategy)
         else:
             await self.state.update_position(result)
 
-        strategy_key = f"{order.exchange}:{order.market_id}:{order.outcome}"
+        strategy_key = self.state._strategy_position_key(order.market_id, order.exchange)
         strategy_existing = self.state.strategy_positions.get(order.strategy, {}).get(strategy_key)
         strategy_result = self._merge_position(strategy_existing, order)
 
         if strategy_result is None:
-            await self.state.remove_strategy_position(order.strategy, order.market_id, order.outcome, order.exchange)
+            await self.state.remove_strategy_position(order.strategy, order.market_id, order.exchange)
         else:
             await self.state.update_strategy_position(strategy_result)
 
@@ -101,22 +127,27 @@ class OrderCoordinator:
                     stale_orders[k] = o
 
             for p in live_positions:
-                strategy_key = f"{p.exchange}:{p.market_id}:{p.outcome}"
-                local_key = f"LIVE:{p.exchange}:{p.market_id}:{p.outcome}"
+                strategy_key = self.state._strategy_position_key(p.market_id, p.exchange)
+                local_key = f"LIVE:{p.exchange}:{p.market_id}"
                 existing = self.state.positions.get(local_key)
-                difference = p.size - (existing.size if existing else 0.0)
+                difference = self.state._signed_position_size(p) - (
+                    self.state._signed_position_size(existing) if existing else 0.0
+                )
 
                 if abs(difference) < 1e-9:
                     continue  # already position size is in sync
 
                 match_key = None
                 for order_key, o in stale_orders.items():
-                    if f"{o.exchange}:{o.market_id}:{o.outcome}" != strategy_key:
+                    if self.state._strategy_position_key(o.market_id, o.exchange) != strategy_key:
                         continue
-                    if abs(o.size - difference) < 1e-6:
+                    signed_order_size = self._signed_order_size(o)
+                    if signed_order_size * difference <= 0:
+                        continue
+                    if abs(o.size - abs(difference)) < 1e-6:
                         match_key = order_key
                         break
-                    if difference < o.size and match_key is None:
+                    if abs(difference) < o.size and match_key is None:
                         match_key = order_key
 
                 if match_key is None:
@@ -124,7 +155,7 @@ class OrderCoordinator:
                     continue  # genuine orphan (or difference > o.size)
 
                 o = stale_orders.pop(match_key)
-                filled_size = min(difference, o.size)
+                filled_size = min(abs(difference), o.size)
                 remaining = o.size - filled_size
 
                 await self._apply_fill(OrderRecord(
@@ -141,5 +172,6 @@ class OrderCoordinator:
                         outcome=o.outcome, side=o.side, size=remaining, price=o.price,
                         status=OrderStatus.PARTIALLY_FILLED, strategy=o.strategy, tif=o.tif
                     ))
+                difference -= (1.0 if difference > 0 else -1.0) * filled_size
 
             await self.state.reconcile(live_positions, live_orders)
